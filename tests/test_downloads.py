@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 from backend.app import app
 from backend.downloads import DownloadManager, QueueFull
+from backend.media import final_name
 
 READY = {'ready': True, 'problems': [], 'versions': {}}
 URL = 'https://www.youtube.com/watch?v='
@@ -20,6 +21,10 @@ HEADERS = {'Origin': 'http://localhost:8766', 'X-Seletor-Client': '1'}
 
 class LocalQueue(DownloadManager):
     """Fake extractor, real subprocess tree and real disk/SQLite operations."""
+    @staticmethod
+    def _valid(path):
+        return path.stat().st_size > 0
+
     def _command(self, job, work):
         script = '''
 import json, pathlib, subprocess, sys, time
@@ -38,6 +43,11 @@ time.sleep(0.2)
         return [sys.executable, '-c', script, str(work), job['video_id']]
 
 
+class StrictQueue(LocalQueue):
+    """Mesmo gerenciador, mas com validação real via ffprobe."""
+    _valid = staticmethod(DownloadManager._valid)
+
+
 class DownloadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -52,6 +62,9 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
 
     def item(self, vid):
         return {'video_id':vid,'url':URL+vid,'title':'Uma música '+vid}
+
+    def final(self, vid):
+        return self.manager.download_dir/final_name(vid,'Uma música '+vid)
 
     async def wait_status(self, job_id, statuses, timeout=5):
         async def poll():
@@ -77,11 +90,14 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['speed'],25)
         await self.wait_status(first, {'converting'})
         await self.wait_status(second, {'completed'})
-        self.assertEqual((self.manager.download_dir/'abcdefghijk.mp3').read_bytes(), b'completed fixture')
+        self.assertEqual(self.final('abcdefghijk').read_bytes(), b'completed fixture')
+        # Sem catálogo, a repetição entra na fila e é resolvida pela verificação, sem novo download.
         again = await self.manager.add([self.item('abcdefghijk')])
-        self.assertEqual(again['skipped'][0]['reason'],'completed')
+        row = await self.wait_status(again['accepted'][0], {'completed'})
+        self.assertIn('já presente', row['message'])
+        self.assertEqual(row['filename'], self.final('abcdefghijk').name)
         # A deleted file may be requested again without erasing prior history.
-        (self.manager.download_dir/'abcdefghijk.mp3').unlink()
+        self.final('abcdefghijk').unlink()
         self.assertEqual(len((await self.manager.add([self.item('abcdefghijk')]))['accepted']),1)
 
     async def test_cancel_active_descendant_pending_and_preserve_completed(self):
@@ -104,7 +120,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.manager.download_dir/'cancelABCDE.mp3').exists())
         self.assertFalse((self.manager.download_dir/'lmnopqrstuv.mp3').exists())
         self.assertFalse(child_file.parent.exists())
-        self.assertTrue((self.manager.download_dir/'abcdefghijk.mp3').is_file())
+        self.assertTrue(self.final('abcdefghijk').is_file())
 
     async def test_failure_continues_and_shutdown_does_not_resume(self):
         failed,next_job=(await self.manager.add([self.item('failureABCD'),self.item('abcdefghijk')]))['accepted']
@@ -147,9 +163,11 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.manager.download_dir.mkdir()
         target=self.manager.download_dir/'abcdefghijk.mp3'
         target.write_bytes(b'keep existing')
-        skipped=await self.manager.add([self.item('abcdefghijk')])
-        self.assertEqual(skipped['accepted'],[])
+        queued=await self.manager.add([self.item('abcdefghijk')])
+        row=await self.wait_status(queued['accepted'][0],{'completed'})
+        self.assertIn('já presente',row['message'])
         self.assertEqual(target.read_bytes(),b'keep existing')
+        self.assertEqual(list(self.manager.download_dir.glob('*.mp3')),[target])
         with self.assertRaises(QueueFull):
             await self.manager.add([self.item('lmnopqrstuv')]*501)
         # Publishing another job cannot replace an existing MP3.
@@ -158,6 +176,44 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         (work/'abcdefghijk.mp3').write_bytes(b'new')
         self.assertTrue(await asyncio.to_thread(self.manager._publish, {'id':'unrecorded','video_id':'abcdefghijk'}, work))
         self.assertEqual(target.read_bytes(),b'keep existing')
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg necessário')
+    async def test_valid_mp3_is_not_downloaded_again_but_damaged_is_replaced(self):
+        manager = StrictQueue(self.manager.data_dir, self.manager.download_dir)
+        await self.manager.close()
+        self.manager = manager
+        with patch('backend.downloads.dependencies', return_value=READY):
+            await manager.start()
+        manager.download_dir.mkdir(exist_ok=True)
+        good = manager.download_dir/'Titulo-bom_abcdefghijk.mp3'
+        await asyncio.to_thread(subprocess.run, ['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=1','-c:a','libmp3lame',str(good)], check=True)
+        damaged = manager.download_dir/'lmnopqrstuv.mp3'
+        damaged.write_bytes(b'not an mp3')
+        result = await manager.add([self.item('abcdefghijk'), self.item('lmnopqrstuv')])
+        self.assertEqual(result['skipped'], [])
+        kept, replaced = result['accepted']
+        row = await self.wait_status(kept, {'completed'})
+        self.assertIn('já presente', row['message'])
+        self.assertEqual(row['filename'], good.name)
+        self.assertNotEqual(good.read_bytes(), b'completed fixture')
+        row = await self.wait_status(replaced, {'completed'})
+        self.assertEqual(row['filename'], final_name('lmnopqrstuv', 'Uma música lmnopqrstuv'))
+        self.assertFalse(damaged.exists())
+        self.assertEqual((manager.download_dir/row['filename']).read_bytes(), b'completed fixture')
+        # Catalogado e inalterado: nem entra na fila (sem ffprobe no clique).
+        stat = good.stat()
+        with manager._connect() as conn:
+            conn.execute("INSERT INTO library_tracks(id,filename,video_id,title,size,mtime_ns,available) VALUES('t',?,?,?,?,?,1)", (good.name,'abcdefghijk','x',stat.st_size,stat.st_mtime_ns))
+        again = await manager.add([self.item('abcdefghijk')])
+        self.assertEqual((again['accepted'], again['skipped'][0]['reason']), ([], 'completed'))
+        # Publicar de novo nunca troca um MP3 legível.
+        work = manager.download_dir/'.partial'/'again'
+        work.mkdir(parents=True)
+        (work/'abcdefghijk.mp3').write_bytes(b'new')
+        before = good.read_bytes()
+        self.assertTrue(await asyncio.to_thread(manager._publish, {'id':'x','video_id':'abcdefghijk','title':'Outro'}, work))
+        self.assertEqual(good.read_bytes(), before)
+        self.assertEqual([p.name for p in manager.download_dir.glob('*abcdefghijk.mp3')], [good.name])
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg necessário')
     async def test_real_ytdlp_ffmpeg_local_fixture(self):
@@ -174,7 +230,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
             job_id=(await manager.add([self.item('abcdefghijk')]))['accepted'][0]
             row=await self.wait_status(job_id,{'completed','failed'},timeout=15)
         self.assertEqual(row['status'],'completed',row['message'])
-        result=await asyncio.to_thread(subprocess.run, ['ffprobe','-v','error','-show_entries','stream=codec_name','-of','json',str(manager.download_dir/'abcdefghijk.mp3')], capture_output=True,text=True,check=True)
+        result=await asyncio.to_thread(subprocess.run, ['ffprobe','-v','error','-show_entries','stream=codec_name','-of','json',str(self.final('abcdefghijk'))], capture_output=True,text=True,check=True)
         self.assertEqual(json.loads(result.stdout)['streams'][0]['codec_name'],'mp3')
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg necessário')

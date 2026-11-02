@@ -14,9 +14,12 @@ function App() {
  useEffect(()=>{try{localStorage.setItem('musicas-v1',JSON.stringify(items))}catch{setNotice('Não foi possível salvar a lista neste navegador.')}},[items]);
  const [downloads,setDownloads]=useState(null), [queueError,setQueueError]=useState(''), [sending,setSending]=useState(false);
  useEffect(()=>{
-  let stopped=false, timer;
-  async function poll(){try{const response=await fetch('/api/downloads');if(!response.ok)throw new Error('Não foi possível carregar a fila. Verifique se o servidor foi atualizado e está em execução.');const data=await response.json();if(!stopped){setDownloads(data);setQueueError('')}}catch(e){if(!stopped)setQueueError(e.message)}finally{if(!stopped)timer=setTimeout(poll,1000)}}
-  poll();return ()=>{stopped=true;clearTimeout(timer)};
+  // 1 s com download ativo e aba visível; 5 s caso contrário. Volta a consultar ao reexibir a aba.
+  let stopped=false, timer, active=false;
+  async function poll(){clearTimeout(timer);try{const response=await fetch('/api/downloads');if(!response.ok)throw new Error('Não foi possível carregar a fila. Verifique se o servidor foi atualizado e está em execução.');const data=await response.json();active=data.jobs.some(j=>['pending','downloading','converting'].includes(j.status));if(!stopped){setDownloads(data);setQueueError('')}}catch(e){if(!stopped)setQueueError(e.message)}finally{if(!stopped)timer=setTimeout(poll,active&&document.visibilityState==='visible'?1000:5000)}}
+  const onVisible=()=>{if(document.visibilityState==='visible')poll()};
+  document.addEventListener('visibilitychange',onVisible);
+  poll();return ()=>{stopped=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible)};
  },[]);
  async function queueAction(path,body){
   setSending(true);setError('');

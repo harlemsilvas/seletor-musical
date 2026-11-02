@@ -14,6 +14,8 @@ import subprocess
 import sys
 import uuid
 
+from .media import final_name, find_files, is_valid_mp3
+from .migrations import migrate
 from .processes import terminate
 
 log = logging.getLogger('seletor.downloads')
@@ -72,10 +74,15 @@ class DownloadManager:
         self.diagnostics = None
         self.on_completed = None
 
-    @contextmanager
-    def _connect(self):
+    def _open(self):
+        """Conexão sem transação automática; quem a usa deve chamar commit()."""
         conn = sqlite3.connect(self.db, timeout=5)
         conn.row_factory = sqlite3.Row
+        return conn
+
+    @contextmanager
+    def _connect(self):
+        conn = self._open()
         try:
             with conn:
                 yield conn
@@ -92,17 +99,7 @@ class DownloadManager:
             self.file_lock = None
             raise RuntimeError('Outra instância do Seletor Musical já está usando o histórico.')
         with self._connect() as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS downloads (
-                id TEXT PRIMARY KEY, video_id TEXT NOT NULL, title TEXT NOT NULL,
-                url TEXT NOT NULL, status TEXT NOT NULL, progress REAL,
-                downloaded REAL, total REAL, speed REAL, eta REAL,
-                message TEXT NOT NULL DEFAULT '', filename TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-            )''')
-            if 'channel' not in {row['name'] for row in conn.execute('PRAGMA table_info(downloads)')}:
-                conn.execute("ALTER TABLE downloads ADD COLUMN channel TEXT NOT NULL DEFAULT ''")
-            conn.execute('CREATE INDEX IF NOT EXISTS downloads_video ON downloads(video_id, status)')
+            migrate(conn)
             conn.execute("UPDATE downloads SET status='interrupted', message='Servidor encerrado. Adicione novamente à fila para tentar de novo.' WHERE status IN ('pending','downloading','converting')")
 
     async def start(self):
@@ -147,6 +144,11 @@ class DownloadManager:
         await io_call(self._update, job_id, **fields)
 
     @staticmethod
+    def _valid(path):
+        """MP3 legível; sobrescrito nos testes que usam arquivos sintéticos."""
+        return is_valid_mp3(path)
+
+    @staticmethod
     def _complete_file(path):
         try:
             return path.is_file() and path.stat().st_size > 0
@@ -162,13 +164,27 @@ class DownloadManager:
                 ORDER BY rowid DESC""")]
             for row in rows:
                 if row['status'] == 'completed':
-                    path = self.download_dir / f"{row['video_id']}.mp3"
+                    path = self.download_dir / (row['filename'] or f"{row['video_id']}.mp3")
                     row['file_exists'] = self._complete_file(path)
             return rows
 
     async def snapshot(self):
         return {'jobs': await asyncio.to_thread(self._rows), 'dependencies': self.diagnostics,
                 'download_dir': str(self.download_dir), 'history_limit': 200}
+
+    @staticmethod
+    def _cataloged(conn, path):
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        row = conn.execute('SELECT 1 FROM library_tracks WHERE filename=? AND available=1 AND size=? AND mtime_ns=?',
+                           (path.name, stat.st_size, stat.st_mtime_ns)).fetchone()
+        return row is not None and stat.st_size > 0
+
+    def _existing_valid(self, video_id):
+        """Primeiro MP3 legível do vídeo na pasta, ou None (inclui ffprobe: rodar fora do loop)."""
+        return next((p for p in find_files(self.download_dir, video_id) if self._complete_file(p) and self._valid(p)), None)
 
     def _add(self, items):
         accepted, skipped = [], []
@@ -182,12 +198,14 @@ class DownloadManager:
                 if existing:
                     skipped.append({'video_id': vid, 'reason': 'queued'})
                     continue
-                final = self.download_dir / f'{vid}.mp3'
-                if self._complete_file(final):
+                # Atalho sem ffprobe: arquivo que o catálogo já validou e que não mudou desde então.
+                # Os demais entram na fila e são verificados, um por vez, antes de qualquer download.
+                good = next((p for p in find_files(self.download_dir, vid) if self._cataloged(conn, p)), None)
+                if good:
                     done = conn.execute("SELECT id FROM downloads WHERE video_id=? AND status='completed' LIMIT 1", (vid,)).fetchone()
                     if not done:
                         conn.execute("INSERT INTO downloads(id,video_id,title,url,status,progress,filename,message) VALUES(?,?,?,?, 'completed',100,?,'Arquivo MP3 já presente na pasta de destino.')",
-                                     (uuid.uuid4().hex, vid, item['title'], item['url'], final.name))
+                                     (uuid.uuid4().hex, vid, item['title'], item['url'], good.name))
                     skipped.append({'video_id': vid, 'reason': 'completed'})
                     continue
                 job_id = uuid.uuid4().hex
@@ -329,13 +347,19 @@ class DownloadManager:
         source = work / f"{job['video_id']}.mp3"
         if not source.is_file() or source.stat().st_size == 0:
             return False
-        target = self.download_dir / source.name
-        # link() é atômico e nunca substitui um arquivo concluído.
-        try:
-            os.link(source, target)
-        except FileExistsError:
-            if not self._complete_file(target):
-                return False
+        existing = find_files(self.download_dir, job['video_id'])
+        keep = next((p for p in existing if self._complete_file(p) and self._valid(p)), None)
+        if keep:
+            # Um MP3 legível nunca é substituído.
+            target = keep
+        else:
+            target = self.download_dir / final_name(job['video_id'], job.get('title', ''))
+            # Somente arquivos já reprovados na validação são trocados.
+            os.replace(source, target)
+            for stale in existing:
+                if stale != target:
+                    with suppress(OSError):
+                        stale.unlink()
         self._update(job['id'], status='completed', progress=100, speed=None, eta=None,
                      filename=target.name, message='MP3 concluído.')
         if self.on_completed:
@@ -351,6 +375,18 @@ class DownloadManager:
         spawn = None
         errors = None
         try:
+            if await asyncio.to_thread(find_files, self.download_dir, job['video_id']):
+                await self.update(job['id'], message='Verificando arquivo já existente…')
+                keep = await io_call(self._existing_valid, job['video_id'])
+                if keep:
+                    # Já baixado e legível: apenas registra; arquivos danificados seguem para novo download.
+                    await self.update(job['id'], status='completed', progress=100, filename=keep.name,
+                                      message='MP3 já presente e legível; download não necessário.')
+                    if self.on_completed:
+                        with suppress(Exception):
+                            self.on_completed()
+                    return
+                await self.update(job['id'], message='Arquivo existente danificado; baixando novamente…')
             await io_call(work.mkdir, parents=True, exist_ok=True)
             # Shield evita perder o processo se cancelarem durante sua criação.
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(

@@ -119,5 +119,18 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.listing(search='Novo MP3'))['total'],1)
         await asyncio.to_thread(self.library.initialize)
         with self.manager._connect() as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],1)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],2)
             self.assertEqual(conn.execute("SELECT status FROM downloads WHERE id='job'").fetchone()[0],'completed')
+
+    async def test_original_title_recorded_and_slug_file_gets_readable_fallback(self):
+        with self.manager._connect() as conn:
+            conn.execute("INSERT INTO downloads(id,video_id,title,url,status,channel) VALUES('old','abcdefghijk','Título: Original (Ao Vivo)','url','completed','Canal')")
+        slug=self.manager.download_dir/'Sem-Historico_lmnopqrstuv.mp3'
+        shutil.copyfile(self.fixture,slug)
+        slug_tags=self.manager.download_dir/'Outro-Arquivo_zzzzzzzzzzz.mp3'
+        await asyncio.to_thread(subprocess.run,['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=1','-c:a','libmp3lame',str(slug_tags)],check=True)
+        await self.scan()
+        items={t['video_id']:t for t in (await self.listing())['items']}
+        self.assertEqual(items['abcdefghijk']['original_title'],'Título: Original (Ao Vivo)')
+        self.assertEqual(items['zzzzzzzzzzz']['title'],'Outro Arquivo')
+        self.assertEqual(items['zzzzzzzzzzz']['original_title'],'')

@@ -215,6 +215,7 @@ async def library_sync(request: Request):
 
 @app.api_route('/api/library/{track_id}/audio', methods=['GET', 'HEAD'])
 async def library_audio(track_id: str, request: Request):
+    # <audio> same-origin não envia Origin nem exige Sec-Fetch-Site; só recusamos origens declaradas e cross-site.
     origin = request.headers.get('origin')
     if (origin and origin not in ORIGINS) or request.headers.get('sec-fetch-site') == 'cross-site':
         raise HTTPException(403, 'Origem não permitida.')

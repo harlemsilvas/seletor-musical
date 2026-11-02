@@ -1,13 +1,13 @@
 """Catálogo local. A pasta de mídia nunca é exposta como diretório público."""
 import asyncio
-import json
 import logging
-import math
 from pathlib import Path
-import re
 import subprocess
 import threading
 import uuid
+
+from .media import display_title, probe_mp3, video_id_from_stem
+from .migrations import migrate
 
 log = logging.getLogger('seletor.library')
 
@@ -24,16 +24,7 @@ class Library:
 
     def initialize(self):
         with self.manager._connect() as conn:
-            if conn.execute('PRAGMA user_version').fetchone()[0] > 1:
-                raise RuntimeError('O catálogo foi criado por uma versão mais nova da aplicação.')
-            conn.execute('''CREATE TABLE IF NOT EXISTS library_tracks (
-                id TEXT PRIMARY KEY, filename TEXT NOT NULL UNIQUE, video_id TEXT,
-                title TEXT NOT NULL, channel TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '',
-                album TEXT NOT NULL DEFAULT '', duration REAL, size INTEGER, mtime_ns INTEGER,
-                available INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
-                added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-            )''')
-            conn.execute('PRAGMA user_version=1')
+            migrate(conn)
 
     async def start(self):
         await asyncio.to_thread(self.initialize)
@@ -78,26 +69,22 @@ class Library:
             return None
 
     def probe(self, path):
-        result = subprocess.run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe',
-                                 '-show_entries', 'format=duration:format_tags=title,artist,album:stream=codec_name,codec_type',
-                                 '-of', 'json', str(path)], stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=8, check=True)
-        data = json.loads(result.stdout)
-        if not any(s.get('codec_type') == 'audio' and s.get('codec_name') == 'mp3' for s in data.get('streams', [])):
-            raise ValueError('Not MP3 audio')
-        fmt = data.get('format', {})
-        duration = float(fmt.get('duration', 0))
-        if not math.isfinite(duration) or duration <= 0:
-            raise ValueError('Invalid duration')
-        tags = {k.lower(): v for k, v in fmt.get('tags', {}).items() if isinstance(v, str)}
-        return duration, tags
+        return probe_mp3(path)
 
     def scan(self):
-        with self.manager._connect() as conn:
-            history = {}
-            for row in conn.execute("SELECT video_id,title,channel FROM downloads WHERE status='completed' ORDER BY rowid DESC"):
-                history.setdefault(row['video_id'], dict(row))
-            previous = {r['filename']: dict(r) for r in conn.execute('SELECT * FROM library_tracks')}
+        # Uma conexão por varredura; commit a cada faixa para não bloquear downloads durante o ffprobe.
+        conn = self.manager._open()
+        try:
+            return self._scan(conn)
+        finally:
+            conn.close()
+
+    def _scan(self, conn):
+        history = {}
+        for row in conn.execute("SELECT video_id,title,channel FROM downloads WHERE status='completed' ORDER BY rowid DESC"):
+            history.setdefault(row['video_id'], dict(row))
+        previous = {r['filename']: dict(r) for r in conn.execute('SELECT * FROM library_tracks')}
+        conn.rollback()
         seen = set()
         count = 0
         # Apenas arquivos da raiz; nunca entrar em .partial.
@@ -115,15 +102,16 @@ class Library:
                 continue
             seen.add(path.name)
             old = previous.get(path.name)
-            vid = path.stem if re.fullmatch(r'[\w-]{11}', path.stem, flags=re.ASCII) else None
+            vid = video_id_from_stem(path.stem)
             record = history.get(vid, {})
             if old and old['available'] and old['size'] == stat.st_size and old['mtime_ns'] == stat.st_mtime_ns:
                 # Reaproveitar metadados; um histórico recuperado ainda pode melhorar o título.
-                with self.manager._connect() as conn:
-                    conn.execute('UPDATE library_tracks SET title=?,channel=? WHERE id=?',
-                                 (record.get('title') or old['title'], record.get('channel') or old['channel'], old['id']))
-                    if old['available']:
-                        conn.execute("UPDATE library_tracks SET message='' WHERE id=?", (old['id'],))
+                title = record.get('title') or old['title']
+                channel = record.get('channel') or old['channel']
+                original = record.get('title') or old['original_title']
+                if (title, channel, original, old['message']) != (old['title'], old['channel'], old['original_title'], ''):
+                    conn.execute("UPDATE library_tracks SET title=?,channel=?,original_title=?,message='' WHERE id=?", (title, channel, original, old['id']))
+                    conn.commit()
                 count += 1
                 continue
             available, message, tags, duration = 1, '', {}, None
@@ -131,21 +119,22 @@ class Library:
                 duration, tags = self.probe(path)
             except (OSError, subprocess.SubprocessError, ValueError, TypeError):
                 available, message = 0, 'MP3 inválido ou não foi possível ler o áudio. Verifique FFprobe e atualize a biblioteca.'
-            title = record.get('title') or tags.get('title') or path.stem
-            with self.manager._connect() as conn:
-                conn.execute('''INSERT INTO library_tracks(id,filename,video_id,title,channel,artist,album,duration,size,mtime_ns,available,message)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(filename) DO UPDATE SET
-                    video_id=excluded.video_id,title=excluded.title,channel=excluded.channel,artist=excluded.artist,
-                    album=excluded.album,duration=excluded.duration,size=excluded.size,mtime_ns=excluded.mtime_ns,
-                    available=excluded.available,message=excluded.message''',
-                    (uuid.uuid4().hex, path.name, vid, title, record.get('channel', ''), tags.get('artist', ''), tags.get('album', ''),
-                     duration, stat.st_size, stat.st_mtime_ns, available, message))
+            title = record.get('title') or tags.get('title') or display_title(path.stem)
+            conn.execute('''INSERT INTO library_tracks(id,filename,video_id,title,channel,artist,album,duration,size,mtime_ns,available,message,original_title)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(filename) DO UPDATE SET
+                video_id=excluded.video_id,title=excluded.title,channel=excluded.channel,artist=excluded.artist,
+                album=excluded.album,duration=excluded.duration,size=excluded.size,mtime_ns=excluded.mtime_ns,
+                available=excluded.available,message=excluded.message,
+                original_title=CASE WHEN excluded.original_title!='' THEN excluded.original_title ELSE library_tracks.original_title END''',
+                (uuid.uuid4().hex, path.name, vid, title, record.get('channel', ''), tags.get('artist', ''), tags.get('album', ''),
+                 duration, stat.st_size, stat.st_mtime_ns, available, message, record.get('title', '')))
+            conn.commit()
             count += 1
         if not self.stop.is_set():
-            with self.manager._connect() as conn:
-                for filename, row in previous.items():
-                    if filename not in seen:
-                        conn.execute("UPDATE library_tracks SET available=0,message='Arquivo não encontrado na pasta de músicas.' WHERE id=?", (row['id'],))
+            for filename, row in previous.items():
+                if filename not in seen and (row['available'] or not row['message']):
+                    conn.execute("UPDATE library_tracks SET available=0,message='Arquivo não encontrado na pasta de músicas.' WHERE id=?", (row['id'],))
+            conn.commit()
         return count
 
     def listing(self, search='', sort='newest', offset=0, limit=50):
@@ -158,6 +147,7 @@ class Library:
             for row in rows:
                 row.pop('filename')
                 row.pop('mtime_ns')
+                row.pop('original_filename')
                 row['available'] = bool(row['available'])
             return {'items': rows, 'total': total, 'offset': offset, 'limit': limit, 'sync': dict(self.state)}
 

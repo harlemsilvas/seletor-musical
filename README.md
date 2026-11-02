@@ -97,6 +97,10 @@ Fechar a aba não encerra a fila enquanto o servidor estiver aberto. Ao reinicia
 
 Na aba **Biblioteca**, busque por título, canal ou artista, ordene e clique em **Tocar**. O player permanece ativo ao trocar de aba. Fechar a página ou encerrar o servidor interrompe o áudio.
 
+Os arquivos novos são gravados como `titulo-sem-acentos_IDDOVIDEO.mp3`, sem espaços, acentos ou símbolos. Se um MP3 legível do vídeo já existir (inclusive no formato antigo `ID.mp3`), ele não é baixado de novo; somente arquivos danificados são substituídos. A verificação acontece na própria fila, um item por vez, sem travar o botão de baixar.
+
+Para renomear MP3s antigos (`ID.mp3`) para o novo padrão, com o servidor parado: `.venv/bin/python -m backend.rename_legacy` mostra o plano e `--apply` executa. O nome anterior fica registrado no catálogo e nada é sobrescrito.
+
 Downloads concluídos entram no catálogo em segundo plano. **Atualizar biblioteca** reconhece MP3s que já estejam diretamente em `~/Música/SeletorMusical`, mesmo sem histórico. Não varre subpastas, `.partial` ou links simbólicos. Não duplica, renomeia ou apaga músicas.
 
 Metadados vêm do histórico e das tags do MP3; o nome do arquivo é usado quando faltam informações. Canal não é tratado automaticamente como artista. Arquivos ausentes ou inválidos ficam indisponíveis após atualizar a biblioteca. A análise usa FFprobe em segundo plano, com tempo limite e cache por tamanho/data do arquivo.

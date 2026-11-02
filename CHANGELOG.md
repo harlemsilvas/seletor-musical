@@ -12,6 +12,15 @@ Alterações ainda não associadas a uma versão publicada são registradas em *
 - Biblioteca local, indexação de MP3s, streaming por ID e player persistente entre abas.
 - Testes de backend e navegador com mídia sintética local.
 
+### Melhorias recentes
+
+- Nomes de arquivo ASCII (`titulo_ID.mp3`) e verificação de MP3 legível com ffprobe: não rebaixa o que já existe; substitui apenas arquivos danificados.
+- `executar.sh` encerra instância anterior da própria aplicação antes de iniciar e recusa a porta 8766 se ocupada por outro programa.
+- Catálogo guarda título original e nome de arquivo anterior; ferramenta `backend.rename_legacy` renomeia MP3s antigos em lote (simulação por padrão).
+- Verificação de MP3 existente movida para a fila serial; itens já catalogados e inalterados são ignorados na hora.
+- Migrações versionadas do SQLite em um único módulo.
+- Varredura da biblioteca com uma conexão e sem gravações desnecessárias; consulta de downloads mais espaçada quando ociosa ou com a aba oculta.
+
 ### Documentação e repositório
 
 - Revisão do README com instalação, uso, dados locais, limitações e estado das plataformas.
