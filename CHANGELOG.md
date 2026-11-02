@@ -14,6 +14,10 @@ Alterações ainda não associadas a uma versão publicada são registradas em *
 
 ### Melhorias recentes
 
+- Metadados do YouTube: artista inferido (origem registrada), ano, miniatura e capa; tags ID3v2.3 e capa 500x500 gravadas no MP3 em novos downloads, com verificação do áudio por MD5.
+- Biblioteca: ordenar/filtrar/agrupar por artista, miniaturas e botão Enriquecer biblioteca (fila serial, com cancelamento e parada em bloqueio anti-bot).
+- Endpoint de capa por ID de faixa; pasta de capas em dados do app.
+
 - Nomes de arquivo ASCII (`titulo_ID.mp3`) e verificação de MP3 legível com ffprobe: não rebaixa o que já existe; substitui apenas arquivos danificados.
 - `executar.sh` encerra instância anterior da própria aplicação antes de iniciar e recusa a porta 8766 se ocupada por outro programa.
 - Catálogo guarda título original e nome de arquivo anterior; ferramenta `backend.rename_legacy` renomeia MP3s antigos em lote (simulação por padrão).

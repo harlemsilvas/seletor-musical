@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from .downloads import DownloadManager, QueueFull
 from .processes import terminate
 from .library import Library
+from .enrich import Enricher
 
 
 @asynccontextmanager
@@ -26,11 +27,14 @@ async def lifespan(app):
     app.state.downloads = manager
     library = Library(manager)
     app.state.library = library
+    enricher = Enricher(manager, library)
+    app.state.enrich = enricher
     try:
         await library.start()
         manager.on_completed = library.request_refresh
         yield
     finally:
+        await enricher.close()
         await library.close()
         await manager.close()
 
@@ -159,6 +163,13 @@ def downloads(request: Request):
     return manager
 
 
+def enricher(request: Request):
+    value = getattr(request.app.state, 'enrich', None)
+    if value is None:
+        raise HTTPException(503, 'Enriquecimento não inicializado. Reinicie o servidor.')
+    return value
+
+
 @app.get('/api/downloads')
 async def download_status(request: Request):
     return await downloads(request).snapshot()
@@ -202,9 +213,33 @@ async def cancel_download(job_id: str, request: Request):
 
 @app.get('/api/library')
 async def library_list(request: Request, search: str = QueryParam('', max_length=200),
-                       sort: str = QueryParam('newest', pattern='^(newest|title)$'),
+                       sort: str = QueryParam('newest', pattern='^(newest|title|artist)$'),
+                       artist: str = QueryParam('', max_length=200),
                        offset: int = QueryParam(0, ge=0), limit: int = QueryParam(50, ge=1, le=100)):
-    return await asyncio.to_thread(request.app.state.library.listing, search, sort, offset, limit)
+    result = await asyncio.to_thread(request.app.state.library.listing, search, sort, offset, limit, artist)
+    enricher = getattr(request.app.state, 'enrich', None)
+    result['enrich'] = dict(enricher.state) if enricher else {'running': False, 'done': 0, 'total': 0, 'failed': 0, 'error': ''}
+    return result
+
+
+@app.post('/api/library/enrich', status_code=202)
+async def library_enrich(request: Request):
+    manager = downloads(request)
+    if not (manager.diagnostics or {}).get('ready'):
+        raise HTTPException(503, 'Dependências ausentes: ' + ' '.join((manager.diagnostics or {}).get('problems', [])))
+    started = enricher(request).start()
+    return {'status': 'started' if started else 'running'}
+
+
+@app.post('/api/library/enrich/cancel')
+async def library_enrich_cancel(request: Request):
+    await enricher(request).cancel()
+    return {'status': 'cancelled'}
+
+
+@app.get('/api/library/artists')
+async def library_artists(request: Request):
+    return {'artists': await asyncio.to_thread(request.app.state.library.artist_list)}
 
 
 @app.post('/api/library/sync', status_code=202)
@@ -213,18 +248,33 @@ async def library_sync(request: Request):
     return {'status': 'scheduled'}
 
 
-@app.api_route('/api/library/{track_id}/audio', methods=['GET', 'HEAD'])
-async def library_audio(track_id: str, request: Request):
-    # <audio> same-origin não envia Origin nem exige Sec-Fetch-Site; só recusamos origens declaradas e cross-site.
+def local_request_only(request: Request):
+    # <audio>/<img> same-origin não enviam Origin nem exigem Sec-Fetch-Site; só recusamos origens declaradas e cross-site.
     origin = request.headers.get('origin')
     if (origin and origin not in ORIGINS) or request.headers.get('sec-fetch-site') == 'cross-site':
         raise HTTPException(403, 'Origem não permitida.')
+
+
+@app.api_route('/api/library/{track_id}/audio', methods=['GET', 'HEAD'])
+async def library_audio(track_id: str, request: Request):
+    local_request_only(request)
     if not re.fullmatch(r'[a-f0-9]{32}', track_id):
         raise HTTPException(404, 'Faixa não encontrada.')
     path = await asyncio.to_thread(request.app.state.library.audio_file, track_id)
     if path is None:
         raise HTTPException(404, 'Arquivo ausente ou indisponível. Atualize a biblioteca.')
     return FileResponse(path, media_type='audio/mpeg', headers={'Cross-Origin-Resource-Policy': 'same-origin'})
+
+
+@app.get('/api/library/{track_id}/cover')
+async def library_cover(track_id: str, request: Request):
+    local_request_only(request)
+    if not re.fullmatch(r'[a-f0-9]{32}', track_id):
+        raise HTTPException(404, 'Capa não encontrada.')
+    path = await asyncio.to_thread(request.app.state.library.cover_file, track_id)
+    if path is None:
+        raise HTTPException(404, 'Capa não encontrada.')
+    return FileResponse(path, media_type='image/jpeg', headers={'Cross-Origin-Resource-Policy': 'same-origin', 'Cache-Control': 'private, max-age=3600'})
 
 
 DIST = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'

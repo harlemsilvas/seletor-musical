@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseTracks, filterTracks, selectedUrls, videoUrl} from './tracks.js';
+import {parseTracks, filterTracks, selectedUrls, videoUrl, groupByArtist} from './tracks.js';
 const url='https://www.youtube.com/watch?v=D0_GWTy9FEM';
 test('JSONL, playlist JSON, plain text, canonical links and deduplication',()=>{
  const raw=JSON.stringify({id:'D0_GWTy9FEM',title:'Faixa',channel:'Canal'})+'\nNome | https://youtu.be/D0_GWTy9FEM?list=RDtest\nOutra | https://youtu.be/abcdefghijk';
@@ -14,4 +14,8 @@ test('filter by title/channel, selection preserved outside filter, selected copy
  assert.equal(filterTracks(items,'CANAL').length,1);assert.equal(filterTracks(items,'outra').length,1);
  const selected=new Set(filterTracks(items,'canal').map(t=>t.id));assert.equal(selectedUrls(items,selected),url);
  selected.add('abcdefghijk');assert.equal(selectedUrls(items,selected).split('\n').length,2);
+});
+test('agrupa por artista principal sem diferenciar maiúsculas e nomeia faixas sem artista',()=>{
+ const groups=groupByArtist([{id:1,artist_primary:'P!NK'},{id:3,artist_primary:'Sia'},{id:2,artist_primary:'P!nk'},{id:4,artist_primary:''}]);
+ assert.deepEqual(groups.map(g=>[g.name,g.items.length]),[['P!NK',2],['Sia',1],['Artista desconhecido',1]]);
 });

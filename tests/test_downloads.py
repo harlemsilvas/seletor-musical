@@ -233,6 +233,38 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         result=await asyncio.to_thread(subprocess.run, ['ffprobe','-v','error','-show_entries','stream=codec_name','-of','json',str(self.final('abcdefghijk'))], capture_output=True,text=True,check=True)
         self.assertEqual(json.loads(result.stdout)['streams'][0]['codec_name'],'mp3')
 
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg necessário')
+    async def test_publish_embeds_tags_and_cover_and_survives_bad_metadata(self):
+        from mutagen.id3 import ID3
+        script = """
+import json, pathlib, subprocess, sys
+work=pathlib.Path(sys.argv[1]); vid=sys.argv[2]
+subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=1','-c:a','libmp3lame',str(work/(vid+'.mp3'))],check=True)
+if vid=='abcdefghijk':
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc=size=640x360:rate=1','-frames:v','1',str(work/(vid+'.jpg'))],check=True)
+    (work/(vid+'.info.json')).write_text(json.dumps({'title':'Artista Teste - Faixa Teste (Official Video)','channel':'Canal','upload_date':'20170816'}))
+else:
+    (work/(vid+'.info.json')).write_text('{ isto nao e json')
+print('SM_CONVERT',flush=True)
+"""
+        with patch.object(self.manager, '_command', side_effect=lambda job, work: [sys.executable, '-c', script, str(work), job['video_id']]):
+            good, bad = (await self.manager.add([self.item('abcdefghijk'), self.item('lmnopqrstuv')]))['accepted']
+            row = await self.wait_status(good, {'completed', 'failed'}, timeout=20)
+            self.assertEqual(row['status'], 'completed', row['message'])
+            await self.wait_status(bad, {'completed', 'failed'}, timeout=20)
+        tags = ID3(self.manager.download_dir/row['filename'])
+        self.assertEqual((str(tags['TIT2']), str(tags['TPE1']), str(tags['TDRC'])), ('Faixa Teste', 'Artista Teste', '2017'))
+        self.assertEqual(str(tags['TXXX:YouTube ID']), 'abcdefghijk')
+        self.assertIn('APIC:Capa', tags)
+        self.assertTrue((self.manager.covers_dir/'abcdefghijk.jpg').is_file())
+        with self.manager._connect() as conn:
+            meta = conn.execute("SELECT artist,track,upload_date,has_cover,source FROM video_meta WHERE video_id='abcdefghijk'").fetchone()
+            self.assertEqual(tuple(meta), ('Artista Teste', 'Faixa Teste', '20170816', 1, 'title'))
+            self.assertIsNone(conn.execute("SELECT 1 FROM video_meta WHERE video_id='lmnopqrstuv'").fetchone())
+        # Metadados inválidos: o MP3 é publicado mesmo assim, sem tags.
+        self.assertEqual((await asyncio.to_thread(self.manager._get, bad))['status'], 'completed')
+        self.assertNotIn('TXXX:YouTube ID', ID3(self.manager.download_dir/final_name('lmnopqrstuv', 'Uma música lmnopqrstuv')))
+
     @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg necessário')
     async def test_cancel_during_real_ffmpeg_conversion(self):
         def conversion_command(job,work):

@@ -8,6 +8,7 @@ Este documento descreve a aplicação local atual do Seletor Musical. Não é um
 
 - **Navegador:** a lista carregada é salva no `localStorage`, por origem e perfil. Pode conter títulos, canais, URLs, duração e endereço de miniaturas. A seleção das caixas e a reprodução atual ficam em memória.
 - **SQLite:** `~/.local/share/seletor-musical/history.sqlite3` guarda histórico de downloads, URLs/identificadores, títulos, canais, estados, progresso, horários e catálogo dos arquivos locais. O catálogo inclui nome do arquivo, tamanho, data de modificação, duração e tags disponíveis, como artista e álbum.
+- **Capas e metadados:** miniaturas JPEG baixadas pelo yt-dlp ficam em `~/.local/share/seletor-musical/covers/`; título, artista, datas e ID do vídeo também são gravados nas tags do próprio MP3 e no SQLite. O botão Enriquecer biblioteca faz consultas ao YouTube; nada é enviado aos mantenedores.
 - **Mídia:** os MP3s ficam em `~/Música/SeletorMusical`. Temporários ficam em `.partial` nessa pasta. O nome de exibição no catálogo pode ser diferente do nome físico do arquivo.
 - **Terminal:** o servidor escreve mensagens de diagnóstico e falhas. O código evita registrar cookies, credenciais e saída bruta do yt-dlp. Tracebacks podem revelar caminhos e outros detalhes do ambiente; revise qualquer log antes de compartilhá-lo.
 

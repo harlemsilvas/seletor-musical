@@ -119,7 +119,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.listing(search='Novo MP3'))['total'],1)
         await asyncio.to_thread(self.library.initialize)
         with self.manager._connect() as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],2)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],4)
             self.assertEqual(conn.execute("SELECT status FROM downloads WHERE id='job'").fetchone()[0],'completed')
 
     async def test_original_title_recorded_and_slug_file_gets_readable_fallback(self):
@@ -134,3 +134,43 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items['abcdefghijk']['original_title'],'Título: Original (Ao Vivo)')
         self.assertEqual(items['zzzzzzzzzzz']['title'],'Outro Arquivo')
         self.assertEqual(items['zzzzzzzzzzz']['original_title'],'')
+
+    async def test_artist_inference_grouping_filter_and_reclassification_of_cached_rows(self):
+        for vid,title,channel in (('aaaaaaaaaaa','P!nk - Try (Official Video)','P!NK'),('bbbbbbbbbbb','P!NK - Sober','P!NK'),
+                                  ('ccccccccccc','Calvin Harris, Rihanna - This Is What You Came For (Official Video)','Calvin Harris')):
+            await asyncio.to_thread(subprocess.run,['ffmpeg','-v','error','-i',str(self.fixture),'-map_metadata','-1','-c:a','copy',str(self.manager.download_dir/f'{vid}.mp3')],check=True)
+            with self.manager._connect() as conn:
+                conn.execute("INSERT INTO downloads(id,video_id,title,url,status,channel) VALUES(?,?,?,'u','completed',?)",(vid,vid,title,channel))
+        await self.scan()
+        data=await self.listing(sort='artist')
+        found=[(t['artist_primary'],t['track']) for t in data['items'] if t['video_id']!='abcdefghijk']
+        self.assertEqual(found,[('Calvin Harris','This Is What You Came For'),('P!NK','Sober'),('P!nk','Try')])
+        artists={a['artist'].casefold():a['count'] for a in await asyncio.to_thread(self.library.artist_list)}
+        self.assertEqual(artists['p!nk'],2)
+        self.assertEqual((await self.listing(artist='p!NK'))['total'],2)
+        self.assertEqual((await self.listing(artist='Rihanna'))['total'],0)
+        # Linha antiga (sem meta_source) é classificada no cache, sem chamar ffprobe.
+        with self.manager._connect() as conn:
+            conn.execute("UPDATE library_tracks SET artist='',artist_primary='',track='',meta_source='' WHERE video_id='aaaaaaaaaaa'")
+        with patch.object(self.library,'probe',side_effect=AssertionError('Cache não utilizado')):
+            await self.scan()
+        row=next(t for t in (await self.listing())['items'] if t['video_id']=='aaaaaaaaaaa')
+        self.assertEqual((row['artist_primary'],row['track'],row['meta_source']),('P!nk','Try','title'))
+        self.assertEqual([a['artist'] for a in (await self.client.get('/api/library/artists')).json()['artists']],['Artista local','Calvin Harris','P!nk'])
+        self.assertEqual((await self.client.get('/api/library?sort=artist&artist=Calvin%20Harris')).json()['total'],1)
+
+    async def test_scan_merges_video_meta_in_cached_and_reanalyzed_rows(self):
+        await self.scan()
+        with self.manager._connect() as conn:
+            conn.execute("INSERT INTO video_meta(video_id,artist,artist_primary,track,album,release_date,upload_date,source,has_cover) VALUES('abcdefghijk','Cantor ft. Convidado','Cantor','Faixa','Disco','2016','20170816','youtube',1)")
+        with patch.object(self.library,'probe',side_effect=AssertionError('Cache não utilizado')):
+            await self.scan()
+        row=(await self.listing())['items'][0]
+        self.assertEqual((row['artist'],row['artist_primary'],row['track'],row['album'],row['release_date'],row['upload_date'],row['has_cover'],row['meta_source'],row['meta_status']),
+                         ('Cantor ft. Convidado','Cantor','Faixa','Disco','2016','20170816',True,'youtube','done'))
+        # Arquivo reanalisado (mtime mudou) mantém os metadados.
+        import os
+        os.utime(self.fixture,ns=(1_000_000_000,1_000_000_000))
+        await self.scan()
+        again=(await self.listing())['items'][0]
+        self.assertEqual((again['id'],again['artist_primary'],again['album'],again['has_cover']),(row['id'],'Cantor','Disco',True))

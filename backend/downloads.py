@@ -14,6 +14,7 @@ import subprocess
 import sys
 import uuid
 
+from . import metadata
 from .media import final_name, find_files, is_valid_mp3
 from .migrations import migrate
 from .processes import terminate
@@ -79,6 +80,10 @@ class DownloadManager:
         conn = sqlite3.connect(self.db, timeout=5)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @property
+    def covers_dir(self):
+        return self.data_dir / 'covers'
 
     @contextmanager
     def _connect(self):
@@ -289,7 +294,8 @@ class DownloadManager:
         return [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-cache-dir',
                 '--js-runtimes', 'node', '--no-playlist', '--no-simulate', '--no-overwrites',
                 '--format', 'bestaudio/best', '--extract-audio', '--audio-format', 'mp3',
-                '--audio-quality', '192K', '--socket-timeout', '15', '--retries', '2',
+                '--audio-quality', '192K', '--write-info-json', '--write-thumbnail', '--convert-thumbnails', 'jpg',
+                '--socket-timeout', '15', '--retries', '2',
                 '--fragment-retries', '2', '--extractor-retries', '1', '--concurrent-fragments', '1', '--no-colors',
                 '--newline', '--progress', '--progress-delta', '0.5',
                 '--progress-template', 'download:SM_PROGRESS {"downloaded":%(progress.downloaded_bytes)j,"total":%(progress.total_bytes)j,"estimate":%(progress.total_bytes_estimate)j,"speed":%(progress.speed)j,"eta":%(progress.eta)j}',
@@ -343,6 +349,14 @@ class DownloadManager:
             await self._progress(job_id, line.strip())
         return await proc.wait()
 
+    def _tag_source(self, job, work, source):
+        """Tags ID3 e capa no MP3 ainda privado; falhas aqui nunca impedem a publicação."""
+        try:
+            metadata.apply(self._connect, self.covers_dir, job['video_id'], work, source,
+                           job.get('title', ''), job.get('channel', ''))
+        except Exception as error:
+            log.warning('Metadados não gravados para %s: %s', job['video_id'], type(error).__name__)
+
     def _publish(self, job, work):
         source = work / f"{job['video_id']}.mp3"
         if not source.is_file() or source.stat().st_size == 0:
@@ -354,6 +368,7 @@ class DownloadManager:
             target = keep
         else:
             target = self.download_dir / final_name(job['video_id'], job.get('title', ''))
+            self._tag_source(job, work, source)
             # Somente arquivos já reprovados na validação são trocados.
             os.replace(source, target)
             for stale in existing:

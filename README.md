@@ -11,7 +11,8 @@ Acesse **http://localhost:8766**. O servidor escuta somente em `127.0.0.1` e dev
 - Importação opcional de texto, JSON e JSONL do yt-dlp, preservando o fluxo do protótipo.
 - Fila de downloads MP3 com um item por vez, progresso real, conversão, cancelamento e remoção de pendentes.
 - Histórico SQLite e identificação de arquivos concluídos para evitar downloads repetidos.
-- Biblioteca local com busca, ordenação e player para tocar/pausar, ajustar volume e avançar na faixa.
+- Biblioteca local com busca, ordenação, agrupamento por artista, miniaturas e player para tocar/pausar, ajustar volume e avançar na faixa.
+- Tags ID3 (título, artista, ano, ID do YouTube) e capa 500x500 gravadas dentro do MP3, para leitores como o do carro. O áudio não é recodificado.
 - Reprodução mantida ao navegar entre as abas da aplicação, sem precisar de internet para ouvir MP3s locais.
 
 Baixe somente conteúdos que você tem autorização para baixar. A licença do software não concede direitos sobre músicas, vídeos ou imagens de terceiros.
@@ -103,7 +104,11 @@ Para renomear MP3s antigos (`ID.mp3`) para o novo padrão, com o servidor parado
 
 Downloads concluídos entram no catálogo em segundo plano. **Atualizar biblioteca** reconhece MP3s que já estejam diretamente em `~/Música/SeletorMusical`, mesmo sem histórico. Não varre subpastas, `.partial` ou links simbólicos. Não duplica, renomeia ou apaga músicas.
 
-Metadados vêm do histórico e das tags do MP3; o nome do arquivo é usado quando faltam informações. Canal não é tratado automaticamente como artista. Arquivos ausentes ou inválidos ficam indisponíveis após atualizar a biblioteca. A análise usa FFprobe em segundo plano, com tempo limite e cache por tamanho/data do arquivo.
+Metadados vêm do histórico, das tags do MP3 e do yt-dlp; o nome do arquivo é usado quando faltam informações.
+
+**Artista e álbum.** Para vídeos oficiais o YouTube normalmente **não informa** artista, álbum nem data de lançamento. O artista é inferido do título no formato "Artista - Título" (ou, sem isso, do nome do canal) e a origem fica registrada; o álbum permanece vazio quando não existe. O ano gravado é o de lançamento, se houver, ou o do envio ao YouTube. Em "Artista" é possível ordenar e filtrar; nomes com vírgula ou "ft." usam o primeiro nome como artista principal, e "&" não divide (preserva "Years & Years").
+
+**Enriquecer biblioteca.** O botão consulta o YouTube (uma música por vez, com pausa, sem cookies) para baixar miniatura e metadados e grava tags e capa dentro de cada MP3. Funciona só com o servidor e a internet disponíveis, espera downloads em andamento e para sozinho se o YouTube pedir verificação anti-bot. Novos downloads já saem com tags e capa. A regravação é verificada (duração e MD5 do áudio idênticos) e troca o arquivo de forma atômica; em qualquer falha o MP3 original é mantido. Arquivos ausentes ou inválidos ficam indisponíveis após atualizar a biblioteca. A análise usa FFprobe em segundo plano, com tempo limite e cache por tamanho/data do arquivo.
 
 ## Dados locais e privacidade
 

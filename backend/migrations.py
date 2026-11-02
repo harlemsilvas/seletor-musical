@@ -34,7 +34,29 @@ def _original_names(conn):
             conn.execute(f"ALTER TABLE library_tracks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
 
-MIGRATIONS = [_initial, _original_names]
+def _track_metadata(conn):
+    """Artista principal (chave de agrupamento), datas, capa e estado do enriquecimento."""
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(library_tracks)')}
+    for column, ddl in (('artist_primary', "TEXT NOT NULL DEFAULT ''"), ('track', "TEXT NOT NULL DEFAULT ''"),
+                        ('release_date', "TEXT NOT NULL DEFAULT ''"), ('upload_date', "TEXT NOT NULL DEFAULT ''"),
+                        ('has_cover', 'INTEGER NOT NULL DEFAULT 0'), ('meta_source', "TEXT NOT NULL DEFAULT ''"),
+                        ('meta_status', "TEXT NOT NULL DEFAULT ''"), ('meta_checked_at', "TEXT NOT NULL DEFAULT ''")):
+        if column not in columns:
+            conn.execute(f'ALTER TABLE library_tracks ADD COLUMN {column} {ddl}')
+    conn.execute('CREATE INDEX IF NOT EXISTS library_artist ON library_tracks(artist_primary)')
+
+
+def _video_meta(conn):
+    """Metadados por vídeo (yt-dlp/enriquecimento); o scan mescla no catálogo."""
+    conn.execute('''CREATE TABLE IF NOT EXISTS video_meta (
+        video_id TEXT PRIMARY KEY, artist TEXT NOT NULL DEFAULT '', artist_primary TEXT NOT NULL DEFAULT '',
+        track TEXT NOT NULL DEFAULT '', album TEXT NOT NULL DEFAULT '', release_date TEXT NOT NULL DEFAULT '',
+        upload_date TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', has_cover INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )''')
+
+
+MIGRATIONS = [_initial, _original_names, _track_metadata, _video_meta]
 
 
 def migrate(conn):

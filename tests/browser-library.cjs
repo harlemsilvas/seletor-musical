@@ -9,6 +9,26 @@ const assert=require('node:assert/strict');
   const base='http://localhost:8767';await page.goto(base);
   await page.getByRole('button',{name:'Biblioteca',exact:true}).click();
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor();
+  // Agrupar por artista (sem diferenciar maiúsculas) e filtrar pelo seletor.
+  await page.getByLabel('Ordenar').selectOption('artist');
+  await page.getByRole('heading',{level:3,name:/banda beta/i}).waitFor();
+  assert.equal(await page.getByRole('heading',{level:3,name:/banda beta/i}).count(),1);
+  await page.getByLabel('Filtrar por artista').locator('option',{hasText:/beta \(2\)/i}).waitFor({state:'attached'});
+  const options=await page.getByLabel('Filtrar por artista').locator('option').allTextContents();
+  assert.ok(options.some(o=>/beta \(2\)/i.test(o)),options.join('|'));
+  await page.getByLabel('Filtrar por artista').selectOption({index:options.findIndex(o=>/beta \(2\)/i.test(o))});
+  await page.getByRole('button',{name:'Tocar Faixa Beta Um',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor({state:'detached'});
+  await page.getByLabel('Filtrar por artista').selectOption('');
+  await page.getByLabel('Ordenar').selectOption('newest');
+  // Miniatura local (capa) e enriquecimento com confirmação.
+  const cover=page.locator('img.cover').first();await cover.waitFor();
+  await page.waitForFunction(()=>{const i=document.querySelector('img.cover');return i&&i.complete&&i.naturalWidth>0});
+  assert.match(await page.locator('article',{has:cover}).innerText(),/Cantor Capa · 2017/);
+  let dialogs=0;page.once('dialog',d=>{dialogs++;d.accept()});
+  await page.getByRole('button',{name:'Enriquecer biblioteca',exact:true}).click();
+  await page.getByText('Enriquecimento iniciado.').or(page.getByText(/Enriquecimento: \d+ atualizadas/)).first().waitFor();
+  assert.equal(dialogs,1);
   await page.getByLabel('Buscar na biblioteca').fill('ARTISTA DE TESTE');
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor();
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).click();

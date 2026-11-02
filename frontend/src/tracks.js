@@ -33,3 +33,14 @@ export function parseTracks(text) {
 }
 export const filterTracks = (items, term) => items.filter(t => `${t.title} ${t.channel}`.toLocaleLowerCase().includes(term.toLocaleLowerCase()));
 export const selectedUrls = (items, selected) => items.filter(t => selected.has(t.id)).map(t => t.url).join('\n');
+export function groupByArtist(items) {
+  // Agrupa pelo artista principal sem diferenciar maiúsculas, mesmo que a lista ainda não esteja ordenada por artista.
+  const groups = new Map();
+  for (const item of items) {
+    const name = item.artist_primary || 'Artista desconhecido';
+    const key = name.toLocaleLowerCase();
+    if (!groups.has(key)) groups.set(key, {name, items: []});
+    groups.get(key).items.push(item);
+  }
+  return [...groups.values()];
+}
