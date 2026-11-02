@@ -102,6 +102,8 @@ Os arquivos novos são gravados como `titulo-sem-acentos_IDDOVIDEO.mp3`, sem esp
 
 Para renomear MP3s antigos (`ID.mp3`) para o novo padrão, com o servidor parado: `.venv/bin/python -m backend.rename_legacy` mostra o plano e `--apply` executa. O nome anterior fica registrado no catálogo e nada é sobrescrito.
 
+Para levar ao carro/dispositivo as músicas de artistas com mais de 2 faixas: `.venv/bin/python -m backend.exportar_artistas` simula e `--apply` copia para `/mnt/midia/SeletorMusical/<Artista>/` (uma pasta por artista). Opções: `--destino`, `--pasta`, `--minimo` (padrão 3). O destino precisa estar montado; os originais não são alterados e nada é sobrescrito.
+
 Downloads concluídos entram no catálogo em segundo plano. **Atualizar biblioteca** reconhece MP3s que já estejam diretamente em `~/Música/SeletorMusical`, mesmo sem histórico. Não varre subpastas, `.partial` ou links simbólicos. Não duplica, renomeia ou apaga músicas.
 
 Metadados vêm do histórico, das tags do MP3 e do yt-dlp; o nome do arquivo é usado quando faltam informações.
@@ -125,7 +127,11 @@ O projeto não implementa telemetria ou envio de estatísticas aos mantenedores.
 
 ## Limitações e solução de problemas
 
-- **Bloqueios do YouTube:** restrições anti-bot, idade, região ou vídeos privados podem impedir consultas e downloads. A janela de verificação permite abrir o YouTube e tentar novamente, mas confirmar no navegador não transfere a sessão ao yt-dlp. Não há suporte a login ou cookies; esperar não garante desbloqueio.
+- **Bloqueios do YouTube:** restrições anti-bot, idade, região ou vídeos privados podem impedir consultas e downloads. Confirmar no navegador não transfere a sessão ao yt-dlp, e não há suporte a login ou cookies.
+  - **Prevenção:** a fila espera de 5 a 10 s (aleatório) entre downloads, como o yt-dlp recomenda. Ajuste com `SELETOR_DOWNLOAD_DELAY="min-max"` em segundos (0 a 60), por exemplo `SELETOR_DOWNLOAD_DELAY=8-15 ./executar.sh`.
+  - **Pausa automática:** ao detectar o bloqueio anti-bot, a fila inteira é pausada e o item atual volta a "Na fila". Nenhuma nova requisição é feita até você clicar em **Retomar fila**; espere de 15 a 60 minutos, pois insistir prolonga o bloqueio. A pausa não é lembrada ao reiniciar o servidor.
+  - **A janela de verificação** só aparece quando uma *consulta* é bloqueada; falhas antigas do histórico não a abrem mais.
+  - Se os bloqueios forem frequentes, atualize o yt-dlp: `.venv/bin/python -m pip install -U yt-dlp`.
 - **Runtime JavaScript:** o projeto usa `yt-dlp[default]` com EJS e habilita Node explicitamente. Consulte o [guia oficial do yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 - **Dependências ausentes:** FFmpeg, FFprobe e Node são verificados antes de aceitar downloads; as falhas aparecem na interface.
 - **Progresso:** tamanhos e tempos podem ser estimados; a tela atualiza a cada segundo e fases muito curtas podem não aparecer.

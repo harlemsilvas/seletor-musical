@@ -1,5 +1,6 @@
 """Fila serial, arquivos privados de trabalho e histórico SQLite."""
 import asyncio
+from datetime import datetime, timezone
 from contextlib import suppress, contextmanager
 import fcntl
 from importlib.metadata import version, PackageNotFoundError
@@ -8,10 +9,12 @@ import logging
 import math
 import os
 from pathlib import Path
+import random
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 
 from . import metadata
@@ -21,6 +24,21 @@ from .processes import terminate
 
 log = logging.getLogger('seletor.downloads')
 ACTIVE = ('pending', 'downloading', 'converting')
+BLOCK_MARKERS = (b'not a bot', b'confirm you')
+PAUSE_MESSAGE = ('Pausado: o YouTube pediu verificação anti-bot. A fila aguarda você retomar; '
+                 'espere de 15 a 60 minutos antes de tentar de novo.')
+
+
+def parse_delay(raw, default):
+    """'5-10' (segundos) -> (5.0, 10.0); valores inválidos mantêm o padrão. Limitado a 0–60 s."""
+    try:
+        low, _, high = raw.partition('-')
+        low, high = float(low), float(high or low)
+    except (AttributeError, ValueError):
+        return default
+    if not (0 <= low <= high <= 60):
+        return default
+    return (low, high)
 
 
 def dependencies():
@@ -60,6 +78,9 @@ class QueueFull(Exception):
 
 
 class DownloadManager:
+    # Intervalo aleatório entre downloads (o yt-dlp recomenda 5–10 s); SELETOR_DOWNLOAD_DELAY="min-max" ajusta.
+    delay = (5.0, 10.0)
+
     def __init__(self, data_dir=None, download_dir=None):
         self.data_dir = Path(data_dir) if data_dir else Path.home() / '.local/share/seletor-musical'
         self.download_dir = Path(download_dir) if download_dir else Path.home() / 'Música/SeletorMusical'
@@ -74,6 +95,10 @@ class DownloadManager:
         self.file_lock = None
         self.diagnostics = None
         self.on_completed = None
+        self.delay = parse_delay(os.getenv('SELETOR_DOWNLOAD_DELAY'), self.delay)
+        self.paused = None  # {'since','reason'} após bloqueio anti-bot; só em memória
+        self.gate_wake = asyncio.Event()
+        self._ready_at = 0.0
 
     def _open(self):
         """Conexão sem transação automática; quem a usa deve chamar commit()."""
@@ -125,6 +150,7 @@ class DownloadManager:
                 self.cancel_requested.add(self.active_id)
                 self.active_task.cancel()
             self.wake.set()
+            self.gate_wake.set()
         try:
             if self.worker:
                 await self.worker
@@ -175,7 +201,31 @@ class DownloadManager:
 
     async def snapshot(self):
         return {'jobs': await asyncio.to_thread(self._rows), 'dependencies': self.diagnostics,
-                'download_dir': str(self.download_dir), 'history_limit': 200}
+                'download_dir': str(self.download_dir), 'history_limit': 200, 'paused': self.paused}
+
+    async def resume(self):
+        """Retoma a fila depois de uma pausa por bloqueio anti-bot (decisão do usuário)."""
+        if not self.paused:
+            return 'not_paused'
+        self.paused = None
+        self.gate_wake.set()
+        self.wake.set()
+        return 'resumed'
+
+    async def _gate(self):
+        """Espera a retomada (se pausado) e o intervalo entre downloads; False se o servidor estiver encerrando."""
+        while not self.stopping:
+            if self.paused:
+                self.gate_wake.clear()
+                await self.gate_wake.wait()
+                continue
+            remaining = self._ready_at - time.monotonic()
+            if remaining <= 0:
+                return True
+            self.gate_wake.clear()
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.gate_wake.wait(), remaining)
+        return False
 
     @staticmethod
     def _cataloged(conn, path):
@@ -263,9 +313,18 @@ class DownloadManager:
             await self.wake.wait()
             self.wake.clear()
             while True:
+                if self.stopping:
+                    return
+                if not await asyncio.to_thread(self._next):
+                    break
+                if not await self._gate():
+                    return
                 async with self.lock:
                     if self.stopping:
                         return
+                    # Pode ter sido cancelado ou ter surgido pausa durante a espera.
+                    if self.paused:
+                        continue
                     job = await asyncio.to_thread(self._next)
                     if not job:
                         break
@@ -286,6 +345,7 @@ class DownloadManager:
                     await self.update(job['id'], status='failed', message='Falha interna. Tente adicionar o vídeo novamente.')
                 finally:
                     async with self.lock:
+                        self._ready_at = time.monotonic() + random.uniform(*self.delay)
                         self.active_id = None
                         self.active_task = None
                         self.cancel_requested.discard(job['id'])
@@ -296,7 +356,7 @@ class DownloadManager:
                 '--format', 'bestaudio/best', '--extract-audio', '--audio-format', 'mp3',
                 '--audio-quality', '192K', '--write-info-json', '--write-thumbnail', '--convert-thumbnails', 'jpg',
                 '--socket-timeout', '15', '--retries', '2',
-                '--fragment-retries', '2', '--extractor-retries', '1', '--concurrent-fragments', '1', '--no-colors',
+                '--fragment-retries', '2', '--extractor-retries', '1', '--sleep-requests', '1', '--concurrent-fragments', '1', '--no-colors',
                 '--newline', '--progress', '--progress-delta', '0.5',
                 '--progress-template', 'download:SM_PROGRESS {"downloaded":%(progress.downloaded_bytes)j,"total":%(progress.total_bytes)j,"estimate":%(progress.total_bytes_estimate)j,"speed":%(progress.speed)j,"eta":%(progress.eta)j}',
                 '--progress-template', 'postprocess:SM_CONVERT',
@@ -330,10 +390,12 @@ class DownloadManager:
         return tail.lower()
 
     @staticmethod
+    def _is_block(tail):
+        return any(marker in tail for marker in BLOCK_MARKERS)
+
+    @staticmethod
     def _failure_message(tail):
         # Somente categorias conhecidas saem do subprocesso; nunca a saída bruta.
-        if b'not a bot' in tail or b"confirm you" in tail:
-            return 'O YouTube solicitou confirmação de que você não é um robô. Esta versão não usa cookies ou login; tente mais tarde. Nenhum MP3 foi concluído.'
         if any(text in tail for text in (b'private video', b'video unavailable', b'not available', b'has been removed')):
             return 'Vídeo privado, removido ou indisponível nesta região. Nenhum MP3 foi concluído.'
         if b'no space left' in tail:
@@ -423,6 +485,12 @@ class DownloadManager:
                     return
             tail = await errors
             log.warning('Download %s falhou (código %s)', job['id'], code)
+            if self._is_block(tail):
+                # O vídeo não tem culpa: volta à fila e todos os demais aguardam, sem novas requisições.
+                self.paused = {'since': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'reason': 'youtube_verification'}
+                await self.update(job['id'], status='pending', progress=None, downloaded=None, total=None,
+                                  speed=None, eta=None, message=PAUSE_MESSAGE)
+                return
             await self.update(job['id'], status='failed', message=self._failure_message(tail))
         except asyncio.TimeoutError:
             await self.update(job['id'], status='failed', message='Tempo máximo de 2 horas excedido.')

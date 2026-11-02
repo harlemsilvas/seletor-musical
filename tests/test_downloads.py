@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import httpx
 from backend.app import app
-from backend.downloads import DownloadManager, QueueFull
+from backend.downloads import DownloadManager, QueueFull, parse_delay
 from backend.media import final_name
 
 READY = {'ready': True, 'problems': [], 'versions': {}}
@@ -21,6 +21,8 @@ HEADERS = {'Origin': 'http://localhost:8766', 'X-Seletor-Client': '1'}
 
 class LocalQueue(DownloadManager):
     """Fake extractor, real subprocess tree and real disk/SQLite operations."""
+    delay = (0.0, 0.0)
+
     @staticmethod
     def _valid(path):
         return path.stat().st_size > 0
@@ -32,6 +34,8 @@ work=pathlib.Path(sys.argv[1]); vid=sys.argv[2]
 if vid == 'cancelABCDE':
     child=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])
     (work/'child.pid').write_text(str(child.pid))
+if vid == 'blockABCDEF' and not (work.parent/'unblocked').exists():
+    sys.stderr.write("ERROR: Sign in to confirm you're not a bot"); sys.exit(1)
 print('SM_PROGRESS '+json.dumps({'downloaded':50,'total':100,'speed':25,'eta':2}), flush=True)
 time.sleep(0.3)
 if vid == 'cancelABCDE': time.sleep(60)
@@ -158,6 +162,84 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         with patch('backend.downloads.dependencies',return_value={'ready':False,'problems':['FFmpeg ausente'],'versions':{}}):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://localhost:8766') as c:
                 self.assertEqual((await c.post('/api/downloads',json=body,headers=HEADERS)).status_code,503)
+
+    async def test_bot_block_pauses_whole_queue_requeues_job_and_resume_continues(self):
+        blocked, other = (await self.manager.add([self.item('blockABCDEF'), self.item('abcdefghijk')]))['accepted']
+        for _ in range(250):
+            if (await self.manager.snapshot())['paused']:
+                break
+            await asyncio.sleep(.02)
+        snapshot = await self.manager.snapshot()
+        self.assertEqual(snapshot['paused']['reason'], 'youtube_verification')
+        row = await asyncio.to_thread(self.manager._get, blocked)
+        self.assertEqual(row['status'], 'pending')
+        self.assertIn('Pausado', row['message'])
+        # Nenhum item avança enquanto pausado, nem o seguinte da fila.
+        await asyncio.sleep(.4)
+        self.assertEqual((await asyncio.to_thread(self.manager._get, other))['status'], 'pending')
+        self.assertIsNone(self.manager.active_id)
+        # Itens podem ser removidos durante a pausa.
+        extra = (await self.manager.add([self.item('lmnopqrstuv')]))['accepted'][0]
+        self.assertEqual(await self.manager.cancel(extra), 'cancelled')
+        self.assertEqual(await self.manager.resume() , 'resumed')
+        self.assertEqual(await self.manager.resume(), 'not_paused')
+        # Ainda bloqueado: pausa de novo, sem consumir os demais.
+        for _ in range(250):
+            if (await self.manager.snapshot())['paused']:
+                break
+            await asyncio.sleep(.02)
+        self.assertIsNotNone(self.manager.paused)
+        (self.manager.download_dir/'.partial'/'unblocked').write_text('ok')
+        await self.manager.resume()
+        await self.wait_status(blocked, {'completed'})
+        await self.wait_status(other, {'completed'})
+        self.assertIsNone((await self.manager.snapshot())['paused'])
+
+    async def test_ordinary_failure_does_not_pause(self):
+        failed, nxt = (await self.manager.add([self.item('failureABCD'), self.item('abcdefghijk')]))['accepted']
+        await self.wait_status(nxt, {'completed'})
+        self.assertEqual((await asyncio.to_thread(self.manager._get, failed))['status'], 'failed')
+        self.assertIsNone(self.manager.paused)
+
+    async def test_delay_between_downloads_is_cancellable_and_shutdown_is_prompt(self):
+        self.manager.delay = (0.5, 0.5)
+        first, second, third = (await self.manager.add([self.item('abcdefghijk'), self.item('lmnopqrstuv'), self.item('wxyzABCDEFG')]))['accepted']
+        loop = asyncio.get_running_loop()
+        await self.wait_status(first, {'completed'})
+        finished = loop.time()
+        await self.wait_status(second, {'downloading', 'converting', 'completed'}, timeout=3)
+        self.assertGreaterEqual(loop.time() - finished, 0.4)
+        await self.wait_status(second, {'completed'})
+        # Durante o intervalo, remover o próximo item funciona e ele nunca roda.
+        self.assertEqual(await self.manager.cancel(third), 'cancelled')
+        await asyncio.sleep(.8)
+        self.assertEqual((await asyncio.to_thread(self.manager._get, third))['status'], 'cancelled')
+        # Encerrar durante um intervalo longo não espera o intervalo.
+        self.manager.delay = (30, 30)
+        a, b = (await self.manager.add([self.item('QRSTUVWXYZa'), self.item('bcdefghijkl')]))['accepted']
+        await self.wait_status(a, {'completed'})
+        started = loop.time()
+        await asyncio.wait_for(self.manager.close(), 3)
+        self.assertLess(loop.time() - started, 3)
+        self.assertEqual((await asyncio.to_thread(self.manager._get, b))['status'], 'interrupted')
+
+    async def test_resume_api_requires_origin_and_reports_state(self):
+        app.state.downloads = self.manager
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost:8766') as c:
+            self.assertEqual((await c.post('/api/downloads/resume')).status_code, 403)
+            self.assertEqual((await c.post('/api/downloads/resume', headers=HEADERS)).json(), {'status': 'not_paused'})
+            self.manager.paused = {'since': '2026-11-02T10:00:00+00:00', 'reason': 'youtube_verification'}
+            self.assertEqual((await c.get('/api/downloads')).json()['paused']['reason'], 'youtube_verification')
+            self.assertEqual((await c.post('/api/downloads/resume', headers=HEADERS)).json(), {'status': 'resumed'})
+            self.assertIsNone((await c.get('/api/downloads')).json()['paused'])
+
+    def test_parse_delay(self):
+        self.assertEqual(parse_delay('5-10', (1, 2)), (5.0, 10.0))
+        self.assertEqual(parse_delay('7', (1, 2)), (7.0, 7.0))
+        self.assertEqual(parse_delay('0-0', (1, 2)), (0.0, 0.0))
+        for bad in (None, '', 'abc', '10-5', '-1-5', '5-61', '61'):
+            self.assertEqual(parse_delay(bad, (1, 2)), (1, 2), bad)
+        self.assertEqual(DownloadManager.delay, (5.0, 10.0))
 
     async def test_no_overwrite_and_queue_capacity(self):
         self.manager.download_dir.mkdir()
@@ -306,6 +388,7 @@ print('SM_CONVERT',flush=True)
     def test_real_command_is_individual_mp3_without_shell(self):
         command=DownloadManager._command(self.manager,self.item('abcdefghijk'),Path('/tmp/work'))
         self.assertIn('--no-playlist',command)
+        self.assertEqual(command[command.index('--sleep-requests')+1],'1')
         self.assertIn('--extract-audio',command)
         self.assertEqual(command[command.index('--audio-format')+1],'mp3')
         self.assertEqual(command[-2: ],['--',URL+'abcdefghijk'])

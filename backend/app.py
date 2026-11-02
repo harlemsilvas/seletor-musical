@@ -199,6 +199,11 @@ async def enqueue(body: DownloadBatch, request: Request):
         raise HTTPException(503, str(error))
 
 
+@app.post('/api/downloads/resume')
+async def resume_downloads(request: Request):
+    return {'status': await downloads(request).resume()}
+
+
 @app.post('/api/downloads/{job_id}/cancel')
 async def cancel_download(job_id: str, request: Request):
     if not re.fullmatch(r'[a-f0-9]{32}', job_id):

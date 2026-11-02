@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useRef} from 'react';
+import React, {useState, useEffect} from 'react';
 import {createRoot} from 'react-dom/client';
 import {parseTracks, filterTracks, selectedUrls} from './tracks';
 import './style.css';
@@ -14,7 +14,7 @@ function batchSummary(batch,downloads){
   // Ativos sempre aparecem na lista; um item ausente já saiu do histórico recente (concluído).
   if(['pending','downloading','converting'].includes(status))remaining++;else if(['failed','cancelled','interrupted'].includes(status))failed++;else done++}
  const ignored=`${batch.done} já concluídas e ${batch.queued} já na fila foram ignoradas.`;
- return `${remaining?'Lote em andamento':'Lote finalizado'}: ${batch.ids.length} adicionadas à fila · ${done} concluídas · ${failed} com falha ou canceladas · ${remaining} restantes. ${ignored}`;
+ return `${remaining?'Lote em andamento':'Lote finalizado'}: ${batch.ids.length} adicionadas à fila · ${done} concluídas · ${failed} com falha ou canceladas · ${remaining} restantes${downloads?.paused?' (fila pausada)':''}. ${ignored}`;
 }
 function App() {
  const [tab,setTab]=useState('select'),[playing,setPlaying]=useState(null);
@@ -40,15 +40,9 @@ function App() {
   }catch(e){setError(e.message)}finally{setSending(false)}
  }
  function enqueue(tracks){if(tracks.length>200){setError('Selecione até 200 músicas por envio à fila.');return}return queueAction('/api/downloads',{items:tracks.map(t=>({url:t.url,title:t.title.slice(0,500),channel:typeof t.channel==='string'?t.channel.slice(0,500):''}))})}
+ async function resumeQueue(){setError('');try{const r=await fetch('/api/downloads/resume',{method:'POST',headers:{'X-Seletor-Client':'1'}});if(!r.ok)throw new Error('Não foi possível retomar a fila.');const status=await fetch('/api/downloads');if(status.ok)setDownloads(await status.json())}catch(e){setError(e.message)}}
  const downloadStates=new Map();for(const job of downloads?.jobs||[]){if(!downloadStates.has(job.video_id))downloadStates.set(job.video_id,job)}
  const [verification,setVerification]=useState(null);
- const seenVerifications=useRef(new Set());
- useEffect(()=>{
-  const blocked=(downloads?.jobs||[]).filter(needsVerification);
-  if(verification)return;
-  const next=blocked.find(job=>!seenVerifications.current.has(job.id));
-  if(next){blocked.forEach(job=>seenVerifications.current.add(job.id));setVerification({...next,kind:'download'})}
- },[downloads,verification]);
  const visible=filterTracks(items,term);
  function load(list){setItems(list);setSelected(new Set());setTerm('');setNotice(`${list.length} músicas carregadas.`)}
  async function query(e){e.preventDefault();return consult(url,limit)}
@@ -58,7 +52,7 @@ function App() {
  function importText(text){setError('');const list=parseTracks(text);if(!list.length){setError('Nenhum vídeo válido encontrado. Cole URLs, texto ou JSONL do yt-dlp.');return}load(list)}
  return <main><header><span className="tag">SUA MÚSICA · SUA ESCOLHA</span><h1>Escolha o que vai tocar.</h1><p>Consulte uma lista do YouTube, selecione suas músicas e baixe em MP3.</p></header>
  <nav className="tabs" aria-label="Seções da aplicação">{[['select','Selecionar'],['downloads','Downloads'],['library','Biblioteca']].map(([key,label])=><button key={key} className={tab===key?'':'secondary'} aria-pressed={tab===key} onClick={()=>setTab(key)}>{label}</button>)}</nav>
- <div role="alert" className="error">{error}</div><div role="status" aria-live="polite">{busy?'Consultando metadados, aguarde…':notice}</div><div className="batch-summary" role="status" aria-live="polite">{batchSummary(batch,downloads)}</div>
+ <div role="alert" className="error">{error}</div><div role="status" aria-live="polite">{busy?'Consultando metadados, aguarde…':notice}</div><div className="batch-summary" role="status" aria-live="polite">{batchSummary(batch,downloads)}</div>{downloads?.paused&&<div className="paused-banner" role="status"><p><strong>Fila pausada.</strong> O YouTube pediu verificação anti-bot às {new Date(downloads.paused.since).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}. Repetir agora tende a piorar o bloqueio: aguarde de 15 a 60 minutos e então retome. Os itens continuam na fila.</p><button onClick={resumeQueue}>Retomar fila</button></div>}
  <div hidden={tab!=='select'}><section><h2>1. Consulte o YouTube</h2><form onSubmit={query}><label>URL de vídeo, playlist ou Mix<input type="url" required value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.youtube.com/playlist?list=…"/></label><div className="row"><label>Limite de itens<input type="number" min="1" max={max} required value={limit} onChange={e=>setLimit(e.target.value)}/></label><button disabled={busy}>{busy?'Consultando…':'Consultar músicas'}</button></div></form><p className="muted">Mixes são dinâmicos: a seleção pode variar em relação ao navegador. Até {max} itens por consulta.</p></section>
  <section><details><summary>Ou importe JSONL / texto</summary><p>Uma URL por linha, Nome | URL, JSON ou JSONL do yt-dlp. A importação substitui a lista atual.</p><textarea aria-label="Lista para importar" value={source} onChange={e=>setSource(e.target.value)}/><div className="row"><button disabled={busy} onClick={()=>importText(source)}>Carregar lista</button><label> Abrir arquivo<input type="file" accept=".txt,.json,.jsonl,.csv" disabled={busy} onChange={async e=>{const file=e.target.files[0];if(!file)return;if(file.size>5*1024*1024){setError('Arquivo excede 5 MB.');return}try{const text=await file.text();setSource(text);importText(text)}catch{setError('Não foi possível ler o arquivo.')}}}/></label></div></details></section>
  <section aria-busy={busy}><h2>2. Sua seleção <small>{items.length} músicas · {selected.size} selecionadas</small></h2><input type="search" aria-label="Buscar por título ou canal" placeholder="Buscar por título ou canal…" value={term} onChange={e=>setTerm(e.target.value)}/><div className="row"><button disabled={!visible.length} onClick={()=>setSelected(old=>new Set([...old,...visible.map(t=>t.id)]))}>Selecionar resultados filtrados ({visible.length})</button><button className="secondary" onClick={()=>setSelected(new Set())}>Desmarcar todas</button><button disabled={!selected.size} onClick={()=>copy(selectedUrls(items,selected))}>Copiar URLs selecionadas</button><button disabled={!selected.size||sending||!downloads?.dependencies?.ready} onClick={()=>enqueue(items.filter(t=>selected.has(t.id)))}>{sending?'Aguarde…':'Baixar selecionadas em MP3'}</button><button className="secondary" disabled={busy} onClick={()=>{load([]);setSource('')}}>Limpar lista</button></div>

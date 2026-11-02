@@ -14,6 +14,9 @@ Alterações ainda não associadas a uma versão publicada são registradas em *
 
 ### Melhorias recentes
 
+- Ferramenta `backend.exportar_artistas` copia para `/mnt/midia` (uma pasta por artista) as músicas de artistas com mais de 2 faixas (simulação por padrão).
+- Bloqueio anti-bot: intervalo de 5–10 s entre downloads (`SELETOR_DOWNLOAD_DELAY`), pausa automática da fila ao detectar o bloqueio com botão **Retomar fila** (`POST /api/downloads/resume`) e fim da janela que reabria a cada carregamento por falhas antigas.
+
 - Metadados do YouTube: artista inferido (origem registrada), ano, miniatura e capa; tags ID3v2.3 e capa 500x500 gravadas no MP3 em novos downloads, com verificação do áudio por MD5.
 - Biblioteca: ordenar/filtrar/agrupar por artista, miniaturas e botão Enriquecer por faixa (`POST /api/library/{id}/enrich`). O lote (fila serial, cancelável, com parada em bloqueio anti-bot) fica no backend, sem botão na interface por ora.
 - Endpoint de capa por ID de faixa; pasta de capas em dados do app.
