@@ -25,10 +25,13 @@ const assert=require('node:assert/strict');
   const cover=page.locator('img.cover').first();await cover.waitFor();
   await page.waitForFunction(()=>{const i=document.querySelector('img.cover');return i&&i.complete&&i.naturalWidth>0});
   assert.match(await page.locator('article',{has:cover}).innerText(),/Cantor Capa · 2017/);
-  let dialogs=0;page.once('dialog',d=>{dialogs++;d.accept()});
-  await page.getByRole('button',{name:'Enriquecer biblioteca',exact:true}).click();
-  await page.getByText('Enriquecimento iniciado.').or(page.getByText(/Enriquecimento: \d+ atualizadas/)).first().waitFor();
-  assert.equal(dialogs,1);
+  // Enriquecimento individual (endpoint simulado: sem rede). Não há botão em lote.
+  assert.equal(await page.getByRole('button',{name:'Enriquecer biblioteca'}).count(),0);
+  const requests=[];
+  await page.route('**/api/library/*/enrich',async route=>{requests.push({method:route.request().method(),header:route.request().headers()['x-seletor-client']});await route.fulfill({json:{status:'ok'}})});
+  await page.getByRole('button',{name:/Atualizar dados de Faixa Com Capa|Enriquecer Faixa Com Capa/}).click();
+  await page.getByText(/Dados e capa de .*Faixa Com Capa.* atualizados/).waitFor();
+  assert.deepEqual(requests,[{method:'POST',header:'1'}]);
   await page.getByLabel('Buscar na biblioteca').fill('ARTISTA DE TESTE');
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor();
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).click();

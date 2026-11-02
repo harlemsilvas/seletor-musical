@@ -231,6 +231,23 @@ async def library_enrich(request: Request):
     return {'status': 'started' if started else 'running'}
 
 
+@app.post('/api/library/{track_id}/enrich')
+async def library_track_enrich(track_id: str, request: Request):
+    if not re.fullmatch(r'[a-f0-9]{32}', track_id):
+        raise HTTPException(404, 'Faixa não encontrada.')
+    manager = downloads(request)
+    if not (manager.diagnostics or {}).get('ready'):
+        raise HTTPException(503, 'Dependências ausentes: ' + ' '.join((manager.diagnostics or {}).get('problems', [])))
+    result = await enricher(request).enrich_track(track_id)
+    if result == 'missing':
+        raise HTTPException(404, 'Faixa não encontrada ou indisponível.')
+    if result == 'busy':
+        raise HTTPException(409, 'Já há um enriquecimento em andamento. Aguarde terminar.')
+    if result == 'download':
+        raise HTTPException(409, 'Há um download em andamento. Tente novamente quando terminar.')
+    return {'status': result}
+
+
 @app.post('/api/library/enrich/cancel')
 async def library_enrich_cancel(request: Request):
     await enricher(request).cancel()

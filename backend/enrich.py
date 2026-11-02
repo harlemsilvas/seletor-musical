@@ -25,6 +25,7 @@ class Enricher:
         self.manager = manager
         self.library = library
         self.task = None
+        self.single = False
         self.state = {'running': False, 'done': 0, 'total': 0, 'failed': 0, 'error': ''}
 
     def _command(self, video_id, work):
@@ -35,7 +36,7 @@ class Enricher:
 
     def start(self):
         """Inicia uma passada; retorna False se já houver uma em andamento."""
-        if self.task and not self.task.done():
+        if self.busy:
             return False
         self.state = {'running': True, 'done': 0, 'total': 0, 'failed': 0, 'error': ''}
         self.task = asyncio.create_task(self.run(), name='library-enrich')
@@ -49,6 +50,28 @@ class Enricher:
 
     async def close(self):
         await self.cancel()
+
+    @property
+    def busy(self):
+        return bool(self.task and not self.task.done()) or self.single
+
+    async def enrich_track(self, track_id):
+        """Enriquece uma única faixa (ação manual). Retorna 'ok', 'failed', 'blocked', 'busy', 'download' ou 'missing'."""
+        if self.busy:
+            return 'busy'
+        if self.manager.active_id:
+            return 'download'
+        with self.manager._connect() as conn:
+            row = conn.execute("SELECT filename,video_id,title,channel FROM library_tracks WHERE id=? AND available=1 AND video_id IS NOT NULL",
+                               (track_id,)).fetchone()
+        if row is None:
+            return 'missing'
+        self.single = True
+        try:
+            return await self._one(dict(row))
+        finally:
+            self.single = False
+            self.library.request_refresh()
 
     def _candidates(self):
         with self.manager._connect() as conn:

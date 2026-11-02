@@ -15,7 +15,7 @@ Alterações ainda não associadas a uma versão publicada são registradas em *
 ### Melhorias recentes
 
 - Metadados do YouTube: artista inferido (origem registrada), ano, miniatura e capa; tags ID3v2.3 e capa 500x500 gravadas no MP3 em novos downloads, com verificação do áudio por MD5.
-- Biblioteca: ordenar/filtrar/agrupar por artista, miniaturas e botão Enriquecer biblioteca (fila serial, com cancelamento e parada em bloqueio anti-bot).
+- Biblioteca: ordenar/filtrar/agrupar por artista, miniaturas e botão Enriquecer por faixa (`POST /api/library/{id}/enrich`). O lote (fila serial, cancelável, com parada em bloqueio anti-bot) fica no backend, sem botão na interface por ora.
 - Endpoint de capa por ID de faixa; pasta de capas em dados do app.
 
 - Nomes de arquivo ASCII (`titulo_ID.mp3`) e verificação de MP3 legível com ffprobe: não rebaixa o que já existe; substitui apenas arquivos danificados.

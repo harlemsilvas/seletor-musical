@@ -171,6 +171,40 @@ class EnrichTests(unittest.IsolatedAsyncioTestCase):
         self.manager.diagnostics = {'ready': False, 'problems': ['ffmpeg ausente.'], 'versions': {}}
         self.assertEqual((await self.client.post('/api/library/enrich', headers=HEADERS)).status_code, 503)
 
+    async def test_single_track_enrich_statuses_and_guards(self):
+        track = self.tracks()[0]
+        url = f"/api/library/{track['id']}/enrich"
+        self.assertEqual((await self.client.post(url)).status_code, 403)
+        self.assertEqual((await self.client.post('/api/library/invalid/enrich', headers=HEADERS)).status_code, 404)
+        self.assertEqual((await self.client.post('/api/library/' + '0' * 32 + '/enrich', headers=HEADERS)).status_code, 404)
+        # Download em andamento: recusa sem consultar o YouTube.
+        self.manager.active_id = 'job'
+        self.assertEqual((await self.client.post(url, headers=HEADERS)).status_code, 409)
+        self.assertEqual(self.enricher.calls, [])
+        self.manager.active_id = None
+        # Só a faixa pedida é consultada e gravada.
+        response = await self.client.post(url, headers=HEADERS)
+        self.assertEqual((response.status_code, response.json()), (200, {'status': 'ok'}))
+        self.assertEqual(self.enricher.calls, [track['video_id']])
+        await asyncio.to_thread(self.library.scan)
+        rows = {t['video_id']: t for t in self.tracks()}
+        self.assertEqual((rows[track['video_id']]['meta_status'], rows[track['video_id']]['has_cover']), ('done', 1))
+        other = next(t for v, t in rows.items() if v != track['video_id'])
+        self.assertEqual((other['meta_status'], other['has_cover']), ('', 0))
+        self.assertIn('TXXX:YouTube ID', ID3(self.manager.download_dir / rows[track['video_id']]['filename']))
+        self.assertNotIn('TXXX:YouTube ID', ID3(self.manager.download_dir / other['filename']))
+        # Ocupado: lote em andamento (ou outra faixa) bloqueia a ação individual.
+        self.enricher.single = True
+        self.assertEqual((await self.client.post(url, headers=HEADERS)).status_code, 409)
+        self.enricher.single = False
+        # Bloqueio anti-bot é informado, sem alterar nada.
+        self.enricher.script = BLOCK_SCRIPT
+        response = await self.client.post(f"/api/library/{other['id']}/enrich", headers=HEADERS)
+        self.assertEqual(response.json(), {'status': 'blocked'})
+        self.assertFalse(self.enricher.busy)
+        self.manager.diagnostics = {'ready': False, 'problems': ['ffmpeg ausente.'], 'versions': {}}
+        self.assertEqual((await self.client.post(url, headers=HEADERS)).status_code, 503)
+
 
 if __name__ == '__main__':
     unittest.main()
