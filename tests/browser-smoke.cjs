@@ -38,13 +38,17 @@ const assert = require('node:assert/strict');
   await page.getByRole('button',{name:'Cancelar download',exact:true}).waitFor();
   assert.equal(posted.length,2);assert.equal(posted[0].url.includes('list='),false);
   assert.equal(await page.getByRole('progressbar').getAttribute('value'),'50');
+  // O resumo do topo acompanha a fila (não é um texto fixo do momento do envio).
+  await page.getByText('Lote em andamento: 2 adicionadas à fila · 0 concluídas · 0 com falha ou canceladas · 2 restantes. 0 já concluídas e 0 já na fila foram ignoradas.').waitFor();
   await page.getByRole('button',{name:'Remover da fila',exact:true}).click();
   await page.getByRole('button',{name:'Remover da fila',exact:true}).waitFor({state:'hidden'});
+  await page.getByText(/Lote em andamento: 2 adicionadas à fila · 0 concluídas · 1 com falha ou canceladas · 1 restantes/).waitFor();
   jobs=jobs.map(j=>j.status==='downloading'?{...j,status:'converting',progress:null}:j);
   await page.locator('.status-converting').waitFor();
   await page.getByRole('button',{name:'Cancelar download',exact:true}).click();
   await page.getByRole('button',{name:'Cancelar download',exact:true}).waitFor({state:'hidden'});
   assert.equal(jobs.every(j=>j.status==='cancelled'),true);
+  await page.getByText(/Lote finalizado: 2 adicionadas à fila · 0 concluídas · 2 com falha ou canceladas · 0 restantes/).waitFor();
   assert.deepEqual(errors,[]);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
