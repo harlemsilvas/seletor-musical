@@ -1,0 +1,169 @@
+"""Catálogo local. A pasta de mídia nunca é exposta como diretório público."""
+import asyncio
+import json
+import logging
+import math
+from pathlib import Path
+import re
+import subprocess
+import threading
+import uuid
+
+log = logging.getLogger('seletor.library')
+
+
+class Library:
+    def __init__(self, manager):
+        self.manager = manager
+        self.root = manager.download_dir
+        self.wake = asyncio.Event()
+        self.stop = threading.Event()
+        self.state = {'running': False, 'checked': 0, 'error': ''}
+        self.task = None
+        self.loop = None
+
+    def initialize(self):
+        with self.manager._connect() as conn:
+            if conn.execute('PRAGMA user_version').fetchone()[0] > 1:
+                raise RuntimeError('O catálogo foi criado por uma versão mais nova da aplicação.')
+            conn.execute('''CREATE TABLE IF NOT EXISTS library_tracks (
+                id TEXT PRIMARY KEY, filename TEXT NOT NULL UNIQUE, video_id TEXT,
+                title TEXT NOT NULL, channel TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '',
+                album TEXT NOT NULL DEFAULT '', duration REAL, size INTEGER, mtime_ns INTEGER,
+                available INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
+                added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )''')
+            conn.execute('PRAGMA user_version=1')
+
+    async def start(self):
+        await asyncio.to_thread(self.initialize)
+        self.loop = asyncio.get_running_loop()
+        self.task = asyncio.create_task(self._worker())
+        self.request_refresh()
+
+    def request_refresh(self):
+        if self.loop and not self.stop.is_set():
+            self.loop.call_soon_threadsafe(self.wake.set)
+
+    async def close(self):
+        self.stop.set()
+        self.wake.set()
+        if self.task:
+            await self.task
+
+    async def _worker(self):
+        while True:
+            await self.wake.wait()
+            self.wake.clear()
+            if self.stop.is_set():
+                return
+            self.state = {'running': True, 'checked': 0, 'error': ''}
+            try:
+                count = await asyncio.to_thread(self.scan)
+                self.state = {'running': False, 'checked': count, 'error': ''}
+            except Exception:
+                log.exception('Falha ao atualizar catálogo local')
+                self.state = {'running': False, 'checked': 0, 'error': 'Não foi possível atualizar a biblioteca. Verifique acesso à pasta e espaço livre.'}
+
+    def safe_file(self, filename):
+        # Arquivos diretos, sem symlinks e sem caminhos fornecidos pelo navegador.
+        path = self.root / filename
+        try:
+            if Path(filename).name != filename or path.suffix.lower() != '.mp3' or path.is_symlink():
+                return None
+            if path.resolve().parent != self.root.resolve() or not path.is_file():
+                return None
+            return path
+        except OSError:
+            return None
+
+    def probe(self, path):
+        result = subprocess.run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                                 '-show_entries', 'format=duration:format_tags=title,artist,album:stream=codec_name,codec_type',
+                                 '-of', 'json', str(path)], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=8, check=True)
+        data = json.loads(result.stdout)
+        if not any(s.get('codec_type') == 'audio' and s.get('codec_name') == 'mp3' for s in data.get('streams', [])):
+            raise ValueError('Not MP3 audio')
+        fmt = data.get('format', {})
+        duration = float(fmt.get('duration', 0))
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError('Invalid duration')
+        tags = {k.lower(): v for k, v in fmt.get('tags', {}).items() if isinstance(v, str)}
+        return duration, tags
+
+    def scan(self):
+        with self.manager._connect() as conn:
+            history = {}
+            for row in conn.execute("SELECT video_id,title,channel FROM downloads WHERE status='completed' ORDER BY rowid DESC"):
+                history.setdefault(row['video_id'], dict(row))
+            previous = {r['filename']: dict(r) for r in conn.execute('SELECT * FROM library_tracks')}
+        seen = set()
+        count = 0
+        # Apenas arquivos da raiz; nunca entrar em .partial.
+        for candidate in self.root.glob('*'):
+            if self.stop.is_set():
+                return count
+            if candidate.suffix.lower() != '.mp3':
+                continue
+            path = self.safe_file(candidate.name)
+            if path is None:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            seen.add(path.name)
+            old = previous.get(path.name)
+            vid = path.stem if re.fullmatch(r'[\w-]{11}', path.stem, flags=re.ASCII) else None
+            record = history.get(vid, {})
+            if old and old['available'] and old['size'] == stat.st_size and old['mtime_ns'] == stat.st_mtime_ns:
+                # Reaproveitar metadados; um histórico recuperado ainda pode melhorar o título.
+                with self.manager._connect() as conn:
+                    conn.execute('UPDATE library_tracks SET title=?,channel=? WHERE id=?',
+                                 (record.get('title') or old['title'], record.get('channel') or old['channel'], old['id']))
+                    if old['available']:
+                        conn.execute("UPDATE library_tracks SET message='' WHERE id=?", (old['id'],))
+                count += 1
+                continue
+            available, message, tags, duration = 1, '', {}, None
+            try:
+                duration, tags = self.probe(path)
+            except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+                available, message = 0, 'MP3 inválido ou não foi possível ler o áudio. Verifique FFprobe e atualize a biblioteca.'
+            title = record.get('title') or tags.get('title') or path.stem
+            with self.manager._connect() as conn:
+                conn.execute('''INSERT INTO library_tracks(id,filename,video_id,title,channel,artist,album,duration,size,mtime_ns,available,message)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(filename) DO UPDATE SET
+                    video_id=excluded.video_id,title=excluded.title,channel=excluded.channel,artist=excluded.artist,
+                    album=excluded.album,duration=excluded.duration,size=excluded.size,mtime_ns=excluded.mtime_ns,
+                    available=excluded.available,message=excluded.message''',
+                    (uuid.uuid4().hex, path.name, vid, title, record.get('channel', ''), tags.get('artist', ''), tags.get('album', ''),
+                     duration, stat.st_size, stat.st_mtime_ns, available, message))
+            count += 1
+        if not self.stop.is_set():
+            with self.manager._connect() as conn:
+                for filename, row in previous.items():
+                    if filename not in seen:
+                        conn.execute("UPDATE library_tracks SET available=0,message='Arquivo não encontrado na pasta de músicas.' WHERE id=?", (row['id'],))
+        return count
+
+    def listing(self, search='', sort='newest', offset=0, limit=50):
+        with self.manager._connect() as conn:
+            conn.create_function('fold', 1, lambda value: value.casefold())
+            where = "instr(fold(title || ' ' || channel || ' ' || artist),fold(?))>0"
+            total = conn.execute(f'SELECT count(*) FROM library_tracks WHERE {where}', (search,)).fetchone()[0]
+            order = 'fold(title), id' if sort == 'title' else 'added_at DESC, id'
+            rows = [dict(row) for row in conn.execute(f'SELECT * FROM library_tracks WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?', (search, limit, offset))]
+            for row in rows:
+                row.pop('filename')
+                row.pop('mtime_ns')
+                row['available'] = bool(row['available'])
+            return {'items': rows, 'total': total, 'offset': offset, 'limit': limit, 'sync': dict(self.state)}
+
+    def audio_file(self, track_id):
+        with self.manager._connect() as conn:
+            row = conn.execute('SELECT filename,available FROM library_tracks WHERE id=?', (track_id,)).fetchone()
+        if not row or not row['available']:
+            return None
+        return self.safe_file(row['filename'])
