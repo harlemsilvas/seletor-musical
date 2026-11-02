@@ -44,3 +44,18 @@ export function groupByArtist(items) {
   }
   return [...groups.values()];
 }
+
+const fold = text => text.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase();
+export const MIN_ARTIST_CHARS = 3;
+export function matchArtists(artists, query, limit = 10) {
+  // A partir do 3º caractere, sem diferenciar acentos/maiúsculas; começa-com vem antes de contém.
+  const q = fold(query.trim());
+  if (q.length < MIN_ARTIST_CHARS) return [];
+  const starts = [], contains = [];
+  for (const item of artists) {
+    const name = fold(item.artist);
+    if (name.startsWith(q)) starts.push(item);
+    else if (name.includes(q)) contains.push(item);
+  }
+  return [...starts, ...contains].slice(0, limit);
+}

@@ -5,3 +5,4 @@ dialog{background:#19241e;color:#edf4ec;border:1px solid #667b6b;border-radius:1
 
 .artist-group h3{margin:20px 0 6px;font-size:17px;color:#b4e6a0}.artist-group h3 small{font-weight:400}
 .cover{width:48px;height:48px;border-radius:8px;object-fit:cover;flex:none}.player .cover{margin-right:12px}
+.artist-picker{position:relative;min-width:230px}.artist-picker label{display:block;margin-bottom:8px}.picker-field{display:flex;gap:6px}.picker-field input{margin:0}.picker-field button{padding:0 14px}.artist-picker ul{position:absolute;z-index:15;left:0;right:0;margin:4px 0 0;padding:4px;list-style:none;background:#19241e;border:1px solid #667b6b;border-radius:9px;max-height:280px;overflow:auto;box-shadow:0 8px 24px #0006}.artist-picker li{padding:9px 10px;border-radius:6px;cursor:pointer}.artist-picker li.active{background:#2b3d32}.artist-picker small{display:block}.artist-picker li small{display:inline}

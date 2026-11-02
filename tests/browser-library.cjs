@@ -13,15 +13,22 @@ const assert=require('node:assert/strict');
   await page.getByLabel('Ordenar').selectOption('artist');
   await page.getByRole('heading',{level:3,name:/banda beta/i}).waitFor();
   assert.equal(await page.getByRole('heading',{level:3,name:/banda beta/i}).count(),1);
-  await page.getByLabel('Filtrar por artista').locator('option',{hasText:/beta \(2\)/i}).waitFor({state:'attached'});
-  const options=await page.getByLabel('Filtrar por artista').locator('option').allTextContents();
-  assert.ok(options.some(o=>/beta \(2\)/i.test(o)),options.join('|'));
-  await page.getByLabel('Filtrar por artista').selectOption({index:options.findIndex(o=>/beta \(2\)/i.test(o))});
+  // Campo de artista: nada antes do 3º caractere; depois sugere e filtra; Escape/× limpa.
+  const picker=page.getByRole('combobox',{name:'Filtrar por artista'});
+  await picker.fill('ba');
+  const suggestions=page.getByRole('listbox',{name:'Artistas encontrados'});
+  assert.equal(await suggestions.count(),0);
+  await page.getByText('Digite pelo menos 3 letras.').waitFor();
+  await picker.fill('BAN');
+  await suggestions.getByRole('option',{name:/beta \(2\)/i}).waitFor();
+  await picker.press('ArrowDown');await picker.press('Enter');
+  await page.getByRole('button',{name:'Limpar filtro de artista'}).waitFor();
   await page.getByRole('button',{name:'Tocar Faixa Beta Um',exact:true}).waitFor();
   await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor({state:'detached'});
-  await page.getByLabel('Filtrar por artista').selectOption('');
+  await page.getByRole('button',{name:'Limpar filtro de artista'}).click();
+  await page.getByRole('button',{name:'Tocar Áudio de teste local',exact:true}).waitFor();
   await page.getByLabel('Ordenar').selectOption('newest');
-  // Miniatura local (capa) e enriquecimento com confirmação.
+  // Miniatura local (capa) e enriquecimento individual.
   const cover=page.locator('img.cover').first();await cover.waitFor();
   await page.waitForFunction(()=>{const i=document.querySelector('img.cover');return i&&i.complete&&i.naturalWidth>0});
   assert.match(await page.locator('article',{has:cover}).innerText(),/Cantor Capa · 2017/);
